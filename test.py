@@ -232,9 +232,107 @@ class Window(object):
         self.surface.damage(x, y, width, height)
     def commit(self):
         self.surface.commit()
+    def pointer_motion(self, seat, time, x, y):
+        pass
     def _shell_surface_ping_handler(self, shell_surface, serial):
         shell_surface.pong(serial)
 
+class Seat(object):
+    c_enum = wayland.interfaces['wl_seat'].enums['capability']
+    def __init__(self, obj, connection, global_name):
+        self.s = obj
+        self._c = connection
+        self.global_name = global_name
+        self.name = None
+        self.capabilities = 0
+        self.pointer = None
+        self.keyboard = None
+        self.s.dispatcher['capabilities'] = self._capabilities
+        self.s.dispatcher['name'] = self._name
+    def removed(self):
+        if self.pointer:
+            self.pointer.release()
+            self.pointer = None
+        if self.keyboard:
+            self.keyboard.release()
+            # XXX Release the xkb state too!
+            self.keyboard = None
+        # ...that's odd, there's no request in the protocol to destroy
+        # the seat proxy!  I suppose we just have to leave it lying
+        # around.
+    def _name(self, seat, name):
+        print("Seat got name: {}".format(name))
+        self.name = name
+    def _capabilities(self, seat, c):
+        print("Seat {} got capabilities: {}".format(self.name, c))
+        self.capabilities = c
+        if c & self.c_enum['pointer'] and not self.pointer:
+            self.pointer = self.s.get_pointer()
+            self.pointer.dispatcher['enter'] = self.pointer_enter
+            self.pointer.dispatcher['leave'] = self.pointer_leave
+            self.pointer.dispatcher['motion'] = self.pointer_motion
+            self.pointer.dispatcher['button'] = self.pointer_button
+            self.pointer.dispatcher['axis'] = self.pointer_axis
+            self.current_pointer_window = None
+        if c & self.c_enum['keyboard'] and not self.keyboard:
+            self.keyboard = self.s.get_keyboard()
+            self.keyboard.dispatcher['keymap'] = self.keyboard_keymap
+            self.keyboard.dispatcher['enter'] = self.keyboard_enter
+            self.keyboard.dispatcher['leave'] = self.keyboard_leave
+            self.keyboard.dispatcher['key'] = self.keyboard_key
+            self.keyboard.dispatcher['modifiers'] = self.keyboard_modifiers
+    def pointer_enter(self, pointer, serial, surface, surface_x, surface_y):
+        print("pointer_enter {} {} {} {}".format(
+            serial, surface, surface_x, surface_y))
+        self.current_pointer_window = self._c.surfaces.get(surface, None)
+        pointer.set_cursor(serial,None,0,0)
+    def pointer_leave(self, pointer, serial, surface):
+        print("pointer_leave {} {}".format(serial, surface))
+        self.current_pointer_window = None
+    def pointer_motion(self, pointer, time, surface_x, surface_y):
+        self.current_pointer_window.pointer_motion(
+            self, time, surface_x, surface_y)
+    def pointer_button(self, pointer, serial, time, button, state):
+        print("pointer_button {} {} {} {}".format(serial, time, button, state))
+        if state == 1 and self.current_pointer_window:
+            print("Seat {} starting shell surface move".format(self.name))
+            self.current_pointer_window.shell_surface.move(self.s, serial)
+    def pointer_axis(self, pointer, time, axis, value):
+        print("pointer_axis {} {} {}".format(time, axis, value))
+    def keyboard_keymap(self, keyboard, format_, fd, size):
+        print("keyboard_keymap {} {} {}".format(format_, fd, size))
+        xkb_keymap_data = mmap.mmap(
+            fd, size, prot=mmap.PROT_READ, flags=mmap.MAP_SHARED)
+        os.close(fd)
+        self.keyboard_xkb_keymap = xkb.xkb_keymap_new_from_string(
+            self._c.xkb_context, xkb_keymap_data[:size],
+            xkb.XKB_KEYMAP_FORMAT_TEXT_V1, xkb.XKB_KEYMAP_COMPILE_NO_FLAGS)
+        self.keyboard_xkb_state = xkb.xkb_state_new(self.keyboard_xkb_keymap)
+        xkb_keymap_data.close()
+    def keyboard_enter(self, keyboard, serial, surface, keys):
+        print("keyboard_enter {} {} {}".format(serial, surface, keys))
+    def keyboard_leave(self, keyboard, serial, surface):
+        print("keyboard_leave {} {}".format(serial, surface))
+    def keyboard_key(self, keyboard, serial, time, key, state):
+        print("keyboard_key {} {} {} {}".format(serial, time, key, state))
+        buf = xkb_ffi.new("char[10]")
+        size = xkb.xkb_state_key_get_utf8(
+            self.keyboard_xkb_state, key+8, buf, 10)
+        if size > 0:
+            pbuf = xkb_ffi.buffer(buf, size)
+            pstring = bytes(pbuf[:])
+            ustring = pstring.decode('utf8')
+            print("size={}  ustring={}".format(size, repr(ustring)))
+            if ustring == "q":
+                global shutdowncode
+                shutdowncode = 0
+    def keyboard_modifiers(self, keyboard, serial, mods_depressed,
+                           mods_latched, mods_locked, group):
+        print("keyboard_modifiers {} {} {} {} {}".format(
+            serial, mods_depressed, mods_latched, mods_locked, group))
+        xkb.xkb_state_update_mask(
+            self.keyboard_xkb_state, mods_depressed, mods_latched,
+            mods_locked, group, 0, 0)
 
 class WaylandConnection(object):
     def __init__(self):
@@ -246,6 +344,8 @@ class WaylandConnection(object):
         self.registry.dispatcher['global_remove'] = \
             self.registry_global_remove_handler
 
+        self.xkb_context = xkb.xkb_context_new(xkb.XKB_CONTEXT_NO_FLAGS)
+
         # Dictionary mapping surface proxies to Window objects
         self.surfaces = {}
 
@@ -253,7 +353,7 @@ class WaylandConnection(object):
         self.shell = None
         self.shm = None
         self.shm_formats = []
-        self.seat = None
+        self.seats = []
 
         # Bind to the globals that we're interested in. NB we won't
         # pick up things like shm_formats at this point; after we bind
@@ -267,25 +367,6 @@ class WaylandConnection(object):
             raise RuntimeError("Shell not found")
         if not self.shm:
             raise RuntimeError("Shm not found")
-        if not self.seat:
-            raise RuntimeError("No Seat found")
-
-        self.xkb_context = xkb.xkb_context_new(xkb.XKB_CONTEXT_NO_FLAGS)
-        
-        self.pointer = self.seat.get_pointer()
-        self.pointer.dispatcher['enter'] = self.pointer_enter
-        self.pointer.dispatcher['leave'] = self.pointer_leave
-        self.pointer.dispatcher['motion'] = self.pointer_motion
-        self.pointer.dispatcher['button'] = self.pointer_button
-        self.pointer.dispatcher['axis'] = self.pointer_axis
-        self.current_pointer_window = None
-
-        self.keyboard = self.seat.get_keyboard()
-        self.keyboard.dispatcher['keymap'] = self.keyboard_keymap
-        self.keyboard.dispatcher['enter'] = self.keyboard_enter
-        self.keyboard.dispatcher['leave'] = self.keyboard_leave
-        self.keyboard.dispatcher['key'] = self.keyboard_key
-        self.keyboard.dispatcher['modifiers'] = self.keyboard_modifiers
 
         # Pick up shm formats
         self.display.roundtrip()
@@ -312,64 +393,14 @@ class WaylandConnection(object):
             self.shm = registry.bind(name, wayland.interfaces['wl_shm'], version)
             self.shm.dispatcher['format'] = self.shm_format_handler
         elif interface == "wl_seat":
-            self.seat = registry.bind(name, wayland.interfaces['wl_seat'], version)
-    def registry_global_remove_handler(self, registry, id_):
-        print("registry_global_remove_handler: {} gone".format(id_))
-    def pointer_enter(self, pointer, serial, surface, surface_x, surface_y):
-        print("pointer_enter {} {} {} {}".format(
-            serial, surface, surface_x, surface_y))
-        self.current_pointer_window = self.surfaces.get(surface, None)
-        pointer.set_cursor(serial,None,0,0)
-    def pointer_leave(self, pointer, serial, surface):
-        print("pointer_leave {} {}".format(serial, surface))
-        self.current_pointer_window = None
-    def pointer_motion(self, pointer, time, surface_x, surface_y):
-        print("pointer_motion {} {} {}".format(
-            time, surface_x, surface_y))
-    def pointer_button(self, pointer, serial, time, button, state):
-        print("pointer_button {} {} {} {}".format(serial, time, button, state))
-        if state == 1 and self.current_pointer_window:
-            print("Starting shell surface move")
-            self.current_pointer_window.shell_surface.move(self.seat, serial)
-    def pointer_axis(self, pointer, time, axis, value):
-        print("pointer_axis {} {} {}".format(time, axis, value))
-    def keyboard_keymap(self, keyboard, format_, fd, size):
-        print("keyboard_keymap {} {} {}".format(format_, fd, size))
-        self.keyboard_xkb_keymap_data = mmap.mmap(
-            fd, size, prot=mmap.PROT_READ, flags=mmap.MAP_SHARED)
-        os.close(fd)
-        #with os.fdopen(fd) as f:
-        #    f.seek(0)
-        #    self.keyboard_xkb_keymap_data = f.read()
-        #    f.seek(0)
-        self.keyboard_xkb_keymap = xkb.xkb_keymap_new_from_string(
-            self.xkb_context, self.keyboard_xkb_keymap_data[:size],
-            xkb.XKB_KEYMAP_FORMAT_TEXT_V1, xkb.XKB_KEYMAP_COMPILE_NO_FLAGS)
-        self.keyboard_xkb_state = xkb.xkb_state_new(self.keyboard_xkb_keymap)
-    def keyboard_enter(self, keyboard, serial, surface, keys):
-        print("keyboard_enter {} {} {}".format(serial, surface, keys))
-    def keyboard_leave(self, keyboard, serial, surface):
-        print("keyboard_leave {} {}".format(serial, surface))
-    def keyboard_key(self, keyboard, serial, time, key, state):
-        print("keyboard_key {} {} {} {}".format(serial, time, key, state))
-        buf = xkb_ffi.new("char[10]")
-        size = xkb.xkb_state_key_get_utf8(
-            self.keyboard_xkb_state, key+8, buf, 10)
-        if size > 0:
-            pbuf = xkb_ffi.buffer(buf, size)
-            pstring = bytes(pbuf[:])
-            ustring = pstring.decode('utf8')
-            print("size={}  ustring={}".format(size, repr(ustring)))
-            if ustring == "q":
-                global shutdowncode
-                shutdowncode = 0
-    def keyboard_modifiers(self, keyboard, serial, mods_depressed,
-                           mods_latched, mods_locked, group):
-        print("keyboard_modifiers {} {} {} {} {}".format(
-            serial, mods_depressed, mods_latched, mods_locked, group))
-        xkb.xkb_state_update_mask(
-            self.keyboard_xkb_state, mods_depressed, mods_latched,
-            mods_locked, group, 0, 0)
+            self.seats.append(Seat(registry.bind(
+                name, wayland.interfaces['wl_seat'], version), self, name))
+    def registry_global_remove_handler(self, registry, name):
+        print("registry_global_remove_handler: {} gone".format(name))
+        for s in self.seats:
+            if s.global_name == name:
+                print("...it was a seat!  Releasing seat resources.")
+                s.removed()
     def shm_format_handler(self, shm, format_):
         f = shm.interface.enums['format']
         if format_ == f.entries['argb8888'].value:

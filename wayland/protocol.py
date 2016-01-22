@@ -320,6 +320,8 @@ class Enum(object):
         self.entries = {}
         self.description = None
         self.summary = None
+        self._values = {}
+        self._names = {}
 
         for c in enum:
             if c.tag == "description":
@@ -327,6 +329,12 @@ class Enum(object):
             elif c.tag == "entry":
                 e = Entry(self, c)
                 self.entries[e.name] = e
+                self._values[e.name] = e.value
+                self._names[e.value] = e.name
+    def __getitem__(self, i):
+        if isinstance(i, int):
+            return self._names[i]
+        return self._values[i]
 
 class Interface(object):
     def __init__(self, protocol, interface):
