@@ -183,7 +183,7 @@ class Arg_object(Arg):
         return struct.pack("I", oid), None, []
     def unmarshal(self, argdata, fd_source, objmap):
         (v, ) = struct.unpack("I", argdata.read(4))
-        return objmap.objects[v]
+        return objmap.objects.get(v, None)
 
 class Arg_fd(Arg):
     """File descriptor argument"""
@@ -192,7 +192,7 @@ class Arg_fd(Arg):
         fd = os.dup(v)
         return b'', None, [fd]
     def unmarshal(self, argdata, fd_source, objmap):
-        return next(fd_source)
+        return fd_source.pop(0)
 
 class Arg_fixed(Arg):
     """Signed 24.8 decimal number argument"""

@@ -2,17 +2,46 @@ import wayland.protocol
 import wayland.utils
 import os
 import socket
-import queue
+import select
 import struct
 import array
 import io
+
+class ServerDisconnected(Exception):
+    """The server disconnected unexpectedly"""
+    pass
+
+class ProtocolError(Exception):
+    """The server sent data that could not be decoded"""
+    pass
+
+class UnknownObjectError(Exception):
+    """The server sent an event for an object we don't know about"""
+    def __init__(self, oid):
+        self.oid = oid
+    def __str__(self):
+        return "UnknownObjectError({})".format(self.oid)
+
+class DisplayError(Exception):
+    """The server sent a fatal error event
+
+    This error can be raised during dispatching of the default queue.
+    """
+    def __init__(self, obj, code, codestr, message):
+        self.obj = obj
+        self.code = code
+        self.codestr = codestr
+        self.message = message
+    def __str__(self):
+        return "DisplayError({}, {} (\"{}\"), {})".format(
+            obj, code, codestr, message)
 
 class Display(wayland.protocol.wayland.interfaces['wl_display'].proxy_class):
     def __init__(self, name_or_fd=None):
         self._f = None
         self._oids = iter(range(1, 0xff000000))
         self._reusable_oids = []
-        self._default_queue = queue.Queue()
+        self._default_queue = []
         super(Display, self).__init__(self, self.get_new_oid(),
                                       self._default_queue)
         if hasattr(name_or_fd, 'fileno'):
@@ -28,11 +57,17 @@ class Display(wayland.protocol.wayland.interfaces['wl_display'].proxy_class):
         path = os.path.join(xdg_runtime_dir, display)
         self._f = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM, 0)
         self._f.connect(path)
+        self._f.setblocking(0)
+
+        # Partial event left from last read
+        self._read_partial_event = b''
+        self._incoming_fds = []
 
         self.objects = {1: self}
-        self._send_queue = queue.Queue()
+        self._send_queue = []
 
         self.dispatcher['delete_id'] = self._delete_id
+        self.dispatcher['error'] = self._error_event
 
     def __del__(self):
         self.disconnect()
@@ -58,35 +93,84 @@ class Display(wayland.protocol.wayland.interfaces['wl_display'].proxy_class):
         del self.objects[id_]
         self._reusable_oids.append(id_)
 
+    def _error_event(self, obj, code, message):
+        # XXX look up string for error code in enum
+        raise DisplayError(obj, code, "", message)
+
     def queue_request(self, r, fds=[]):
         #print("Queueing to send: {} with fds {}".format(repr(r), fds))
-        self._send_queue.put((r,fds))
+        self._send_queue.append((r,fds))
 
-    def dispatch(self):
-        # Dispatch the default event queue
-        # If the queue is empty, block until events are available
-        self.flush() # really?
-        self.recv()
-        self.dispatch_pending()
-
-    def dispatch_pending(self):
-        try:
-            while True:
-                proxy, event, args = self._default_queue.get(False)
-                proxy.dispatch_event(event, args)
-        except queue.Empty:
-            pass
-        
     def flush(self):
-        try:
-            while True:
-                b, fds = self._send_queue.get(False)
+        """Send buffered requests to the display server.
+
+        Will send as many requests as possible to the display server.
+        Will not block; if sendmsg() would block, will leave events in
+        the queue.
+
+        Returns True if the queue was emptied.
+        """
+        while self._send_queue:
+            b, fds = self._send_queue.pop(0)
+            try:
                 self._f.sendmsg([b], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
                                        array.array("i", fds))])
                 for fd in fds:
                     os.close(fd)
-        except queue.Empty:
-            pass
+            except socket.error as e:
+                if socket.errno == 11:
+                    # Would block.  Return the data to the head of the queue
+                    # and try again later!
+                    self._send_queue.insert(0, (b, fds))
+                    return
+                raise
+        return True
+
+    def recv(self):
+        # Receive as much data as is available.  Returns True if any
+        # data was received.
+        data = None
+        try:
+            fds = array.array("i")
+            data, ancdata, msg_flags, address = self._f.recvmsg(
+                1024, socket.CMSG_SPACE(16*fds.itemsize))
+            for cmsg_level, cmsg_type, cmsg_data in ancdata:
+                if (cmsg_level == socket.SOL_SOCKET and
+                    cmsg_type == socket.SCM_RIGHTS):
+                    fds.fromstring(cmsg_data[
+                        :len(cmsg_data) - (len(cmsg_data) % fds.itemsize)])
+            self._incoming_fds.extend(fds)
+            if data:
+                self.decode(data)
+                return True
+            else:
+                raise ServerDisconnected()
+        except socket.error as e:
+            if e.errno == 11:
+                # No data available; would otherwise block
+                return
+            raise
+
+    def dispatch(self):
+        # Dispatch the default event queue.
+
+        # If the queue is empty, block until events are available and
+        # dispatch them.
+        self.flush()
+        while not self._default_queue:
+            select.select([self._f], [], [])
+            self.recv()
+        self.dispatch_pending()
+
+    def dispatch_pending(self):
+        # Dispatch pending events from the default event queue,
+        # without reading any further events from the socket.
+        while self._default_queue:
+            e = self._default_queue.pop(0)
+            if isinstance(e, Exception):
+                raise e
+            proxy, event, args = e
+            proxy.dispatch_event(event, args)
 
     def roundtrip(self):
         # Block until all pending requests are processed by the server
@@ -96,33 +180,15 @@ class Display(wayland.protocol.wayland.interfaces['wl_display'].proxy_class):
             ready = True
         l = self.sync()
         l.dispatcher['done'] = set_ready
-        self.flush()
         while not ready:
-            self.flush()
             self.dispatch()
 
-    def recv(self):
-        # Isn't this a blocking call?
-        fds = array.array("i")
-        data, ancdata, msg_flags, address = self._f.recvmsg(
-            1024, socket.CMSG_SPACE(16*fds.itemsize))
-        #print("Received: data={} ancdata={}".format(repr(data),repr(ancdata)))
-        for cmsg_level, cmsg_type, cmsg_data in ancdata:
-            if (cmsg_level == socket.SOL_SOCKET and
-                cmsg_type == socket.SCM_RIGHTS):
-                fds.fromstring(cmsg_data[
-                    :len(cmsg_data) - (len(cmsg_data) % fds.itemsize)])
-        fds = list(fds)
-        if data:
-            self.decode(data, fds)
-        else:
-            raise RuntimeError
-
-    def decode(self, data, fds):
-        # Quick and dirty unpack for now - update to use buffer later
-        fd_source = iter(fds)
+    def decode(self, data):
+        # There may be partial event data already received; add to it
+        # if it's there
+        if self._read_partial_event:
+            data = self._read_partial_event + data
         while len(data) > 8:
-            # We assume the data starts with a message
             oid, sizeop = struct.unpack("II", data[0:8])
             
             size = sizeop >> 16
@@ -131,18 +197,18 @@ class Display(wayland.protocol.wayland.interfaces['wl_display'].proxy_class):
             if len(data) < size:
                 print("Partial event received: {} byte event, "
                       "{} bytes available".format(size, len(data)))
-                return
+                break
 
             argdata = io.BytesIO(data[8:size])
             data = data [size:]
 
             obj = self.objects.get(oid, None)
-            if not obj:
-                print("Received event for unknown oid {}".format(oid))
-                continue
-
-            with argdata:
-                e = obj._unmarshal_event(op, argdata, fd_source)
-                print("Decoded event: {}({}) {} {}".format(
-                    e[0].interface.name, e[0]._oid, e[1].name, e[2]))
-                obj.queue.put(e)
+            if obj:
+                with argdata:
+                    e = obj._unmarshal_event(op, argdata, self._incoming_fds)
+                    #print("Decoded event: {}({}) {} {}".format(
+                    #    e[0].interface.name, e[0]._oid, e[1].name, e[2]))
+                    obj.queue.append(e)
+            else:
+                obj.queue.append(UnknownObjectError(obj))
+        self._read_partial_event = data

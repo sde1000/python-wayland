@@ -255,7 +255,10 @@ class WaylandConnection(object):
         self.shm_formats = []
         self.seat = None
 
-        self.display.dispatch()
+        # Bind to the globals that we're interested in. NB we won't
+        # pick up things like shm_formats at this point; after we bind
+        # to wl_shm we need another roundtrip before we can be sure to
+        # have received them.
         self.display.roundtrip()
 
         if not self.compositor:
@@ -283,15 +286,20 @@ class WaylandConnection(object):
         self.keyboard.dispatcher['leave'] = self.keyboard_leave
         self.keyboard.dispatcher['key'] = self.keyboard_key
         self.keyboard.dispatcher['modifiers'] = self.keyboard_modifiers
-        
+
+        # Pick up shm formats
+        self.display.roundtrip()
+
         rdlist.append(self)
         preselectlist.append(self._preselect)
     def fileno(self):
         return self.display.get_fd()
+    def disconnect(self):
+        self.display.disconnect()
     def doread(self):
-        self.display.dispatch()
-    def _preselect(self):
+        self.display.recv()
         self.display.dispatch_pending()
+    def _preselect(self):
         self.display.flush()
     def registry_global_handler(self, registry, name, interface, version):
         print("registry_global_handler: {} is {} v{}".format(
@@ -404,5 +412,6 @@ if __name__ == "__main__":
     w.redraw()
     
     eventloop()
+    conn.disconnect()
     print("About to exit with code {}".format(shutdowncode))
     sys.exit(shutdowncode)
