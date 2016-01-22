@@ -29,8 +29,7 @@ class Display(wayland.protocol.wayland.interfaces['wl_display'].proxy_class):
         self._f = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM, 0)
         self._f.connect(path)
 
-        self._objects = {1: self}
-        self._next_object_id = 2
+        self.objects = {1: self}
         self._send_queue = queue.Queue()
 
         self.dispatcher['delete_id'] = self._delete_id
@@ -55,8 +54,8 @@ class Display(wayland.protocol.wayland.interfaces['wl_display'].proxy_class):
         return next(self._oids)
 
     def _delete_id(self, display, id_):
-        print("Deleting id {} ({})".format(id_, self._objects[id_]))
-        del self._objects[id_]
+        print("Deleting id {} ({})".format(id_, self.objects[id_]))
+        del self.objects[id_]
         self._reusable_oids.append(id_)
 
     def queue_request(self, r, fds=[]):
@@ -137,7 +136,7 @@ class Display(wayland.protocol.wayland.interfaces['wl_display'].proxy_class):
             argdata = io.BytesIO(data[8:size])
             data = data [size:]
 
-            obj = self._objects.get(oid, None)
+            obj = self.objects.get(oid, None)
             if not obj:
                 print("Received event for unknown oid {}".format(oid))
                 continue

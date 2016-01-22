@@ -31,7 +31,7 @@ class Proxy(object):
         rval = None
         fl = []
         for a in request.args:
-            b, r, fds = a.marshal(self, args)
+            b, r, fds = a.marshal(args, self._display)
             al.append(b)
             fl = fl + fds
             rval = rval or r
@@ -43,7 +43,7 @@ class Proxy(object):
         event = self.interface.events_by_number[opcode]
         args = []
         for arg in event.args:
-            v = arg.unmarshal(argdata, fd_source)
+            v = arg.unmarshal(argdata, fd_source, self._display)
             args.append(v)
         return (self, event, args)
     def set_queue(self, new_queue):
@@ -74,35 +74,60 @@ class Arg(object):
             if c.tag == "description":
                 self.description, self.summary = _description(c)
 
-    def marshal(self, proxy, args):
+    def marshal(self, args, objmap):
+        """Marshal the argument
+
+        args is the list of arguments still to marshal; this call
+        removes the appropriate number of items from args
+
+        objmap is an object that implements a get_new_oid() function
+        and has an objects dictionary
+
+        The return value is a tuple of (bytes, optional return value,
+        list of fds to send)
+        """
         print("Unimplemented marshal of {}".format(self.type))
         raise RuntimeError
-    def unmarshal(self, argdata, fd_source):
+    def unmarshal(self, argdata, fd_source, objmap):
+        """Unmarshal the argument
+
+        argdata is a file-like object providing access to the
+        remaining marshalled arguments; this call will consume the
+        appropriate number of bytes from this source
+
+        fd_source is an iterator object supplying fds that have been
+        received over the connection
+
+        objmap is an object that implements a get_new_oid() function
+        and has an objects dictionary
+
+        The return value is the value of the argument
+        """
         print("Unimplemented unmarshal of {}".format(self.type))
         raise RuntimeError
 
 class Arg_int(Arg):
     """Signed 32-bit integer argument"""
-    def marshal(self, proxy, args):
+    def marshal(self, args, objmap):
         v = args.pop(0)
         return struct.pack('i', v), None, []
-    def unmarshal(self, argdata, fd_source):
+    def unmarshal(self, argdata, fd_source, objmap):
         (v, ) = struct.unpack("i", argdata.read(4))
         return v
 
 class Arg_uint(Arg):
     """Unsigned 32-bit integer argument"""
-    def marshal(self, proxy, args):
+    def marshal(self, args, objmap):
         v = args.pop(0)
         return struct.pack('I', v), None, []
-    def unmarshal(self, argdata, fd_source):
+    def unmarshal(self, argdata, fd_source, objmap):
         (v, ) = struct.unpack("I", argdata.read(4))
         return v
 
 class Arg_new_id(Arg):
     """Newly created object argument"""
-    def marshal(self, proxy, args):
-        nid = proxy._display.get_new_oid()
+    def marshal(self, args, objmap):
+        nid = objmap.get_new_oid()
         if self.parent.creates:
             # The interface type and version are determined by the
             # request
@@ -120,19 +145,22 @@ class Arg_new_id(Arg):
                      b'\x00'*(4-(len(iname) % 4)),
                      struct.pack('II',version,nid))
             b = b''.join(parts)
-        new_proxy = npc(proxy._display, nid, proxy._display._default_queue)
-        proxy._display._objects[nid] = new_proxy
+        # XXX this works in a client, but I assume we need to do
+        # something different if we are marshalling this type when the
+        # server is sending an event to a client?
+        new_proxy = npc(objmap, nid, objmap._default_queue)
+        objmap.objects[nid] = new_proxy
         return b, new_proxy, []
 
 class Arg_string(Arg):
     """String argument"""
-    def marshal(self, proxy, args):
+    def marshal(self, args, objmap):
         estr = args.pop(0).encode('utf-8')
         parts = (struct.pack('I',len(estr)+1),
                  estr,
                  b'\x00'*(4-(len(estr) % 4)))
         return b''.join(parts), None, []
-    def unmarshal(self, argdata, fd_source):
+    def unmarshal(self, argdata, fd_source, objmap):
         # The length includes the terminating null byte
         (l, ) = struct.unpack("I", argdata.read(4))
         assert l > 0
@@ -143,7 +171,7 @@ class Arg_string(Arg):
 
 class Arg_object(Arg):
     """Existing object argument"""
-    def marshal(self, proxy, args):
+    def marshal(self, args, objmap):
         v = args.pop(0)
         if v:
             oid = v._oid
@@ -153,43 +181,52 @@ class Arg_object(Arg):
             else:
                 raise NullArgumentException()
         return struct.pack("I", oid), None, []
-    def unmarshal(self, argdata, fd_source):
+    def unmarshal(self, argdata, fd_source, objmap):
         (v, ) = struct.unpack("I", argdata.read(4))
-        # XXX look up the object!  Oh, we need the display as an argument...
-        return v
+        return objmap.objects[v]
 
 class Arg_fd(Arg):
     """File descriptor argument"""
-    def marshal(self, proxy, args):
+    def marshal(self, args, objmap):
         v = args.pop(0)
         fd = os.dup(v)
         return b'', None, [fd]
-    def unmarshal(self, argdata, fd_source):
+    def unmarshal(self, argdata, fd_source, objmap):
         return next(fd_source)
 
 class Arg_fixed(Arg):
     """Signed 24.8 decimal number argument"""
-    def marshal(self, proxy, args):
+    # XXX not completely sure I've understood the format here - in
+    # particular, is it (as the protocol description says) a sign bit
+    # followed by 23 bits of integer precision and 8 bits of decimal
+    # precision, or is it 24 bits of 2's complement integer precision
+    # followed by 8 bits of decimal precision?  I've assumed the
+    # latter because it seems to work!
+    def marshal(self, args, objmap):
         v = args.pop(0)
-        m = v << 8
+        if isinstance(v, int):
+            m = v << 8
+        else:
+            m = (int(v) << 8) + int((v % 1.0) * 256)
         return struct.pack("i",m), None, []
-    def unmarshal(self, argdata, fd_source):
+    def unmarshal(self, argdata, fd_source, objmap):
         b = argdata.read(4)
-        return b
+        (m, ) = struct.unpack("i",b)
+        return float(m >> 8) + ((m & 0xff) / 256.0)
 
 class Arg_array(Arg):
     """Array argument"""
     # This appears to be very similar to a string, except without any
     # zero termination.  Interpretation of the contents of the array
     # is request- or event-dependent.
-    def marshal(self, proxy, args):
+    def marshal(self, args, objmap):
         v = args.pop(0)
         # v should be bytes
         parts = (struct.pack('I',len(v)),
                  estr,
                  b'\x00'*(3 - ((len(v) - 1) % 4)))
         return b''.join(parts), None, []
-    def unmarshal(self, argdata, fd_source):
+    def unmarshal(self, argdata, fd_source, objmap):
         (l, ) = struct.unpack("I", argdata.read(4))
         v = argdata.read(l)
         pad = 3 - ((l - 1) % 4)

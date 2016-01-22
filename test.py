@@ -192,6 +192,7 @@ class Window(object):
         self.width = width
         self.height = height
         self.surface = self._w.compositor.create_surface()
+        self._w.surfaces[self.surface] = self
         self.shell_surface = self._w.shell.get_shell_surface(self.surface)
         self.shell_surface.set_toplevel()
         self.shell_surface.set_title(title)
@@ -245,6 +246,9 @@ class WaylandConnection(object):
         self.registry.dispatcher['global_remove'] = \
             self.registry_global_remove_handler
 
+        # Dictionary mapping surface proxies to Window objects
+        self.surfaces = {}
+
         self.compositor = None
         self.shell = None
         self.shm = None
@@ -271,6 +275,7 @@ class WaylandConnection(object):
         self.pointer.dispatcher['motion'] = self.pointer_motion
         self.pointer.dispatcher['button'] = self.pointer_button
         self.pointer.dispatcher['axis'] = self.pointer_axis
+        self.current_pointer_window = None
 
         self.keyboard = self.seat.get_keyboard()
         self.keyboard.dispatcher['keymap'] = self.keyboard_keymap
@@ -305,14 +310,19 @@ class WaylandConnection(object):
     def pointer_enter(self, pointer, serial, surface, surface_x, surface_y):
         print("pointer_enter {} {} {} {}".format(
             serial, surface, surface_x, surface_y))
+        self.current_pointer_window = self.surfaces.get(surface, None)
         pointer.set_cursor(serial,None,0,0)
     def pointer_leave(self, pointer, serial, surface):
         print("pointer_leave {} {}".format(serial, surface))
+        self.current_pointer_window = None
     def pointer_motion(self, pointer, time, surface_x, surface_y):
         print("pointer_motion {} {} {}".format(
             time, surface_x, surface_y))
     def pointer_button(self, pointer, serial, time, button, state):
         print("pointer_button {} {} {} {}".format(serial, time, button, state))
+        if state == 1 and self.current_pointer_window:
+            print("Starting shell surface move")
+            self.current_pointer_window.shell_surface.move(self.seat, serial)
     def pointer_axis(self, pointer, time, axis, value):
         print("pointer_axis {} {} {}".format(time, axis, value))
     def keyboard_keymap(self, keyboard, format_, fd, size):
