@@ -219,7 +219,9 @@ class Window(object):
 
         self.s = cairo.ImageSurface(cairo_shm_format, width, height,
                                     data=self.shm_data, stride=stride)
-
+    def close(self):
+        self.surface.destroy()
+        del self.s
     def redraw(self):
         """Copy the whole window surface to the display"""
         self.add_damage()
@@ -442,7 +444,12 @@ if __name__ == "__main__":
     w.s.flush()
     w.redraw()
     
-    eventloop()
+    try:
+        eventloop()
+    finally:
+        w.close()
+    conn.display.roundtrip()
     conn.disconnect()
     print("About to exit with code {}".format(shutdowncode))
+
     sys.exit(shutdowncode)
