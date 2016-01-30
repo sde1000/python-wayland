@@ -6,6 +6,9 @@ import select
 import struct
 import array
 import io
+import logging
+
+log = logging.getLogger(__name__)
 
 class ServerDisconnected(Exception):
     """The server disconnected unexpectedly"""
@@ -46,6 +49,7 @@ class Display(wayland.protocol.wayland.interfaces['wl_display'].proxy_class):
                                       self._default_queue)
         if hasattr(name_or_fd, 'fileno'):
             self._f = name_or_fd
+            log.info("connected to existing fd %d", self._f)
         else:
             xdg_runtime_dir = os.getenv('XDG_RUNTIME_DIR')
             if not xdg_runtime_dir:
@@ -54,9 +58,11 @@ class Display(wayland.protocol.wayland.interfaces['wl_display'].proxy_class):
                 display = os.getenv('WAYLAND_DISPLAY')
                 if not display:
                     display = "wayland-0"
-        path = os.path.join(xdg_runtime_dir, display)
-        self._f = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM, 0)
-        self._f.connect(path)
+            path = os.path.join(xdg_runtime_dir, display)
+            self._f = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM, 0)
+            self._f.connect(path)
+            log.info("connected to %s", path)
+
         self._f.setblocking(0)
 
         # Partial event left from last read
@@ -67,6 +73,7 @@ class Display(wayland.protocol.wayland.interfaces['wl_display'].proxy_class):
         self._send_queue = []
 
         self.dispatcher['delete_id'] = self._delete_id
+        self.silence['delete_id'] = True
         self.dispatcher['error'] = self._error_event
 
     def __del__(self):
@@ -89,7 +96,7 @@ class Display(wayland.protocol.wayland.interfaces['wl_display'].proxy_class):
         return next(self._oids)
 
     def _delete_id(self, display, id_):
-        print("Deleting id {} ({})".format(id_, self.objects[id_]))
+        log.info("deleting %s", self.objects[id_])
         del self.objects[id_]
         self._reusable_oids.append(id_)
 
@@ -98,7 +105,7 @@ class Display(wayland.protocol.wayland.interfaces['wl_display'].proxy_class):
         raise DisplayError(obj, code, "", message)
 
     def queue_request(self, r, fds=[]):
-        #print("Queueing to send: {} with fds {}".format(repr(r), fds))
+        log.debug("queueing to send: %s with fds %s", r, fds)
         self._send_queue.append((r,fds))
 
     def flush(self):
@@ -121,6 +128,7 @@ class Display(wayland.protocol.wayland.interfaces['wl_display'].proxy_class):
                 if socket.errno == 11:
                     # Would block.  Return the data to the head of the queue
                     # and try again later!
+                    log.debug("flush would block; returning data to queue")
                     self._send_queue.insert(0, (b, fds))
                     return
                 raise
@@ -195,8 +203,8 @@ class Display(wayland.protocol.wayland.interfaces['wl_display'].proxy_class):
             op = sizeop & 0xffff
 
             if len(data) < size:
-                print("Partial event received: {} byte event, "
-                      "{} bytes available".format(size, len(data)))
+                log.debug("partial event received: %d byte event, "
+                          "%d bytes available", size, len(data))
                 break
 
             argdata = io.BytesIO(data[8:size])
@@ -206,8 +214,8 @@ class Display(wayland.protocol.wayland.interfaces['wl_display'].proxy_class):
             if obj:
                 with argdata:
                     e = obj._unmarshal_event(op, argdata, self._incoming_fds)
-                    #print("Decoded event: {}({}) {} {}".format(
-                    #    e[0].interface.name, e[0]._oid, e[1].name, e[2]))
+                    log.debug("queueing event: %s(%d) %s %s",
+                              e[0].interface.name, e[0]._oid, e[1].name, e[2])
                     obj.queue.append(e)
             else:
                 obj.queue.append(UnknownObjectError(obj))

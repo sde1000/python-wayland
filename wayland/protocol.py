@@ -1,8 +1,9 @@
-from __future__ import print_function, unicode_literals
-
 from lxml import etree
 import struct
 import os
+import logging
+
+log = logging.getLogger(__name__)
 
 def _int_or_none(i):
     if i is None:
@@ -23,6 +24,8 @@ class Proxy(object):
         self._oid = oid
         self.queue = queue
         self.dispatcher = {}
+        self.silence = {}
+        self.log = logging.getLogger(__name__ + "." + self.interface.name)
     def _marshal_request(self, request, *args):
         # args is a tuple when called; we make it a list so it's mutable,
         # because args are consumed in the 'for' loop
@@ -52,11 +55,20 @@ class Proxy(object):
     def dispatch_event(self, event, args):
         f = self.dispatcher.get(event.name, None)
         if f:
+            if event.name not in self.silence:
+                self.log.info("dispatch event %s(%d).%s%s",
+                              self.interface.name,
+                              self._oid, event.name, args)
             f(self, *args)
+        else:
+            if event.name not in self.silence:
+                self.log.info("ignore   event %s(%d).%s%s",
+                              self.interface.name,
+                              self._oid, event.name, args)
     def __str__(self):
         return "{}({})".format(self.interface.name, self._oid)
     def __repr__(self):
-        return "{}({})".format(self.__class__.__name__, self._oid)
+        return str(self)
 
 class Arg(object):
     def __init__(self, parent, arg):
@@ -86,7 +98,6 @@ class Arg(object):
         The return value is a tuple of (bytes, optional return value,
         list of fds to send)
         """
-        print("Unimplemented marshal of {}".format(self.type))
         raise RuntimeError
     def unmarshal(self, argdata, fd_source, objmap):
         """Unmarshal the argument
@@ -103,7 +114,6 @@ class Arg(object):
 
         The return value is the value of the argument
         """
-        print("Unimplemented unmarshal of {}".format(self.type))
         raise RuntimeError
 
 class Arg_int(Arg):
@@ -272,8 +282,11 @@ class Request(object):
 
     def __call__(self, proxy, *args):
         r = proxy._marshal_request(self, *args)
-        print("Request {}({}): {}{} returns {}".format(
-            proxy.interface.name, proxy._oid, self.name, args, str(r)))
+        if r:
+            proxy.log.info(
+                "request %s.%s%s -> %s", proxy, self.name, args, r)
+        else:
+            proxy.log.info("request %s.%s%s", proxy, self.name, args)
         return r
 
 class Event(object):
@@ -293,7 +306,7 @@ class Event(object):
             elif c.tag == "arg":
                 self.args.append(make_arg(self, c))
     def __str__(self):
-        return "Event {} on {}".format(self.name, self.interface)
+        return "{}::{}".format(self.interface, self.name)
 
 class Entry(object):
     def __init__(self, enum, entry):
@@ -373,6 +386,12 @@ class Interface(object):
         for r in self.requests.values():
             d[r.name] = add_proxy_arg(r)
         self.proxy_class = type(str(self.name+'_proxy'), (Proxy,), d)
+
+    def __str__(self):
+        return self.name
+
+    def __repr__(self):
+        return "Interface({})".format(self.name)
 
 class Protocol(object):
     def __init__(self, filename, dtdfile=None):

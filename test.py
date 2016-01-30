@@ -148,6 +148,7 @@ doexcept_time_guard = time_guard("doexcept",0.5)
 alarm_time_guard = time_guard("alarm",0.5)
 
 def eventloop():
+    global shutdowncode
     while shutdowncode is None:
         for i in ticklist:
             with tick_time_guard:
@@ -164,7 +165,11 @@ def eventloop():
         for i in preselectlist:
             with preselect_time_guard:
                 i()
-        (rd,wr,ex)=select.select(rdlist,[],[],timeout)
+        try:
+            (rd,wr,ex)=select.select(rdlist,[],[],timeout)
+        except KeyboardInterrupt:
+            (rd, wr, ex) = [], [], []
+            shutdowncode = 1
         for i in rd:
             with doread_time_guard:
                 i.doread()
@@ -273,6 +278,7 @@ class Seat(object):
             self.pointer.dispatcher['enter'] = self.pointer_enter
             self.pointer.dispatcher['leave'] = self.pointer_leave
             self.pointer.dispatcher['motion'] = self.pointer_motion
+            self.pointer.silence['motion'] = True
             self.pointer.dispatcher['button'] = self.pointer_button
             self.pointer.dispatcher['axis'] = self.pointer_axis
             self.current_pointer_window = None
@@ -413,6 +419,8 @@ class WaylandConnection(object):
             self.shm_formats.append((format_, cairo.FORMAT_RGB16_565))
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.WARNING)
+
     conn = WaylandConnection()
     w = Window(conn, 640, 480)
     ctx = cairo.Context(w.s)
@@ -429,6 +437,8 @@ if __name__ == "__main__":
     ctx.set_source(pat)
     ctx.fill()
 
+    del pat
+
     ctx.translate(0.1, 0.1)
 
     ctx.move_to(0, 0)
@@ -441,15 +451,17 @@ if __name__ == "__main__":
     ctx.set_line_width(0.02)
     ctx.stroke()
 
+    del ctx
+
     w.s.flush()
     w.redraw()
-    
-    try:
-        eventloop()
-    finally:
-        w.close()
+
+    eventloop()
+
+    w.close()
     conn.display.roundtrip()
     conn.disconnect()
     print("About to exit with code {}".format(shutdowncode))
 
+    logging.shutdown()
     sys.exit(shutdowncode)
