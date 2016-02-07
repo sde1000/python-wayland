@@ -99,7 +99,8 @@ class Display(wayland.protocol.wayland.interfaces['wl_display'].proxy_class):
         log.info("deleting %s", self.objects[id_])
         self.objects[id_]._oid = None
         del self.objects[id_]
-        self._reusable_oids.append(id_)
+        if id_ < 0xff000000:
+            self._reusable_oids.append(id_)
 
     def _error_event(self, obj, code, message):
         # XXX look up string for error code in enum
