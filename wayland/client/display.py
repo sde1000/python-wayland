@@ -97,6 +97,7 @@ class Display(wayland.protocol.wayland.interfaces['wl_display'].proxy_class):
 
     def _delete_id(self, display, id_):
         log.info("deleting %s", self.objects[id_])
+        self.objects[id_]._oid = None
         del self.objects[id_]
         self._reusable_oids.append(id_)
 

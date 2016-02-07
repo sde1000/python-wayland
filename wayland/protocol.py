@@ -18,6 +18,10 @@ class NullArgumentException(Exception):
     """None was passed where a value was expected"""
     pass
 
+class DeletedProxyException(Exception):
+    """A request was made on an object that has already been deleted"""
+    pass
+
 class Proxy(object):
     def __init__(self, display, oid, queue):
         self._display = display
@@ -25,6 +29,7 @@ class Proxy(object):
         self.queue = queue
         self.dispatcher = {}
         self.silence = {}
+        self.destroyed = False
         self.log = logging.getLogger(__name__ + "." + self.interface.name)
     def _marshal_request(self, request, *args):
         # args is a tuple when called; we make it a list so it's mutable,
@@ -53,6 +58,11 @@ class Proxy(object):
         # Sets the queue for events received from this object
         self.queue = new_queue
     def dispatch_event(self, event, args):
+        if self.destroyed:
+            self.log.info("ignore   event %s(%d).%s%s on destroyed proxy",
+                          self.interface.name,
+                          self._oid, event.name, args)
+            return
         f = self.dispatcher.get(event.name, None)
         if f:
             if event.name not in self.silence:
@@ -281,12 +291,23 @@ class Request(object):
         return "{}.{}".format(self.interface.name,self.name)
 
     def __call__(self, proxy, *args):
+        if not proxy._oid:
+            proxy.log.warning("request %s on deleted %s proxy",
+                              self.name, proxy.interface.name)
+            raise DeletedProxyException
+        if proxy.destroyed:
+            proxy.log.info("request %s.%s%s on destroyed object; ignoring",
+                           proxy, self.name, args)
+            return
         r = proxy._marshal_request(self, *args)
         if r:
             proxy.log.info(
                 "request %s.%s%s -> %s", proxy, self.name, args, r)
         else:
             proxy.log.info("request %s.%s%s", proxy, self.name, args)
+        if self.is_destructor:
+            proxy.destroyed = True
+            proxy.log.info("proxy destroyed by request")
         return r
 
 class Event(object):
