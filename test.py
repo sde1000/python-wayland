@@ -3,7 +3,7 @@ import os
 import mmap
 import cairocffi as cairo
 import wayland
-from wayland.client.display import Display
+from wayland.client import Display
 from wayland.protocol import wayland
 from wayland.utils import AnonymousFile
 from wayland.xkb import XKBContext
