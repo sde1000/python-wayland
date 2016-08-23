@@ -431,7 +431,14 @@ def draw_in_window(w):
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
-    conn = WaylandConnection()
+    try:
+        conn = WaylandConnection()
+    except FileNotFoundError as e:
+        if e.errno == 2:
+            print("Unable to connect to the compositor - "
+                  "is one running?")
+            sys.exit(1)
+        raise
     w1 = Window(conn, 640, 480, redraw=draw_in_window)
     w2 = Window(conn, 320, 240, redraw=draw_in_window)
 
