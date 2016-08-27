@@ -6,12 +6,14 @@ import wayland
 from wayland.client import Display
 from wayland.protocol import wayland
 from wayland.utils import AnonymousFile
-from wayland.xkb import XKBContext
 import math
 
 import select
 import time
 import logging
+
+# See https://github.com/sde1000/python-xkbcommon for the following:
+from xkbcommon import xkb
 
 log=logging.getLogger(__name__)
 
@@ -188,7 +190,7 @@ class Seat(object):
         self.keyboard = None
         self.s.dispatcher['capabilities'] = self._capabilities
         self.s.dispatcher['name'] = self._name
-        self.tabsym = connection.xkb_context.keysym_from_name("Tab")
+        self.tabsym = xkb.keysym_from_name("Tab")
     def removed(self):
         if self.pointer:
             self.pointer.release()
@@ -244,11 +246,14 @@ class Seat(object):
     def keyboard_keymap(self, keyboard, format_, fd, size):
         print("keyboard_keymap {} {} {}".format(format_, fd, size))
         keymap_data = mmap.mmap(
-            fd, size, prot=mmap.PROT_READ, flags=mmap.MAP_SHARED)
+            fd, 0, prot=mmap.PROT_READ, flags=mmap.MAP_SHARED)
         os.close(fd)
-        keymap = self._c.xkb_context.keymap_from_string(keymap_data[:size])
+        # The provided keymap appears to have a terminating NULL which
+        # xkbcommon chokes on.  Specify length=size-1 to remove it.
+        keymap = self._c.xkb_context.keymap_new_from_buffer(
+            keymap_data, length=size - 1)
         keymap_data.close()
-        self.keyboard_state = keymap.new_state()
+        self.keyboard_state = keymap.state_new()
     def keyboard_enter(self, keyboard, serial, surface, keys):
         print("keyboard_enter {} {} {}".format(serial, surface, keys))
         self.current_keyboard_window = self._c.surfaces.get(surface, None)
@@ -257,13 +262,11 @@ class Seat(object):
         self.current_keyboard_window = None
     def keyboard_key(self, keyboard, serial, time, key, state):
         print("keyboard_key {} {} {} {}".format(serial, time, key, state))
-        sym = self.keyboard_state.get_keysym(key + 8)
+        sym = self.keyboard_state.key_get_one_sym(key + 8)
         if state == 1 and sym == self.tabsym:
             print("Saw a tab!")
-        symstr = self.keyboard_state.get_keysym_string(key + 8)
-        print(" -> keysym {}".format(symstr))
         if state == 1:
-            s = self.keyboard_state.get_string(key + 8)
+            s = self.keyboard_state.key_get_string(key + 8)
             print("s={}".format(repr(s)))
             if s == "q":
                 global shutdowncode
@@ -318,7 +321,7 @@ class WaylandConnection(object):
         self.registry.dispatcher['global_remove'] = \
             self.registry_global_remove_handler
 
-        self.xkb_context = XKBContext()
+        self.xkb_context = xkb.Context()
 
         # Dictionary mapping surface proxies to Window objects
         self.surfaces = {}
