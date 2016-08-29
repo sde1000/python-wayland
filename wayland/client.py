@@ -1,3 +1,5 @@
+"""Wayland protocol client implementation"""
+
 import wayland.protocol
 import os
 import socket
@@ -39,13 +41,19 @@ class DisplayError(Exception):
         return "DisplayError({}, {} (\"{}\"), {})".format(
             obj, code, codestr, message)
 
-class _Display():
+class _Display:
+    """Additional methods for wl_display interface proxy
+
+    The wl_display proxy class obtained by loading the Wayland
+    protocol XML file needs to be augmented with some additional
+    methods to function as a full Wayland protocol client.
+    """
     def __init__(self, name_or_fd=None):
         self._f = None
         self._oids = iter(range(1, 0xff000000))
         self._reusable_oids = []
         self._default_queue = []
-        super(_Display, self).__init__(self, self.get_new_oid(),
+        super(_Display, self).__init__(self, self._get_new_oid(),
                                        self._default_queue)
         if hasattr(name_or_fd, 'fileno'):
             self._f = name_or_fd
@@ -69,7 +77,7 @@ class _Display():
         self._read_partial_event = b''
         self._incoming_fds = []
 
-        self.objects = {1: self}
+        self.objects = {self.oid: self}
         self._send_queue = []
 
         self.dispatcher['delete_id'] = self._delete_id
@@ -79,25 +87,33 @@ class _Display():
     def __del__(self):
         self.disconnect()
 
-    def connect(self):
-        pass # For compatibility with pywayland
-
     def disconnect(self):
+        """Disconnect from the server.
+
+        Closes the socket.  After calling this method, all further
+        calls to this proxy or any other proxies on the connection
+        will fail.
+        """
         if self._f:
             self._f.close()
             self._f = None
 
     def get_fd(self):
+        """Get the file descriptor number of the server connection.
+
+        This can be used in calls to select(), poll(), etc. to wait
+        for events from the server.
+        """
         return self._f.fileno()
 
-    def get_new_oid(self):
+    def _get_new_oid(self):
         if self._reusable_oids:
             return self._reusable_oids.pop()
         return next(self._oids)
 
     def _delete_id(self, display, id_):
         self.log.info("deleting %s", self.objects[id_])
-        self.objects[id_]._oid = None
+        self.objects[id_].oid = None
         del self.objects[id_]
         if id_ < 0xff000000:
             self._reusable_oids.append(id_)
@@ -106,7 +122,7 @@ class _Display():
         # XXX look up string for error code in enum
         raise DisplayError(obj, code, "", message)
 
-    def queue_request(self, r, fds=[]):
+    def _queue_request(self, r, fds=[]):
         self.log.debug("queueing to send: %s with fds %s", r, fds)
         self._send_queue.append((r,fds))
 
@@ -137,13 +153,15 @@ class _Display():
         return True
 
     def recv(self):
-        # Receive as much data as is available.  Returns True if any
-        # data was received.
+        """Receive as much data as is available.
+
+        Returns True if any data was received.  Will not block.
+        """
         data = None
         try:
             fds = array.array("i")
             data, ancdata, msg_flags, address = self._f.recvmsg(
-                1024, socket.CMSG_SPACE(16*fds.itemsize))
+                1024, socket.CMSG_SPACE(16 * fds.itemsize))
             for cmsg_level, cmsg_type, cmsg_data in ancdata:
                 if (cmsg_level == socket.SOL_SOCKET and
                     cmsg_type == socket.SCM_RIGHTS):
@@ -151,7 +169,7 @@ class _Display():
                         :len(cmsg_data) - (len(cmsg_data) % fds.itemsize)])
             self._incoming_fds.extend(fds)
             if data:
-                self.decode(data)
+                self._decode(data)
                 return True
             else:
                 raise ServerDisconnected()
@@ -162,10 +180,11 @@ class _Display():
             raise
 
     def dispatch(self):
-        # Dispatch the default event queue.
+        """Dispatch the default event queue.
 
-        # If the queue is empty, block until events are available and
-        # dispatch them.
+        If the queue is empty, block until events are available and
+        dispatch them.
+        """
         self.flush()
         while not self._default_queue:
             select.select([self._f], [], [])
@@ -173,8 +192,10 @@ class _Display():
         self.dispatch_pending()
 
     def dispatch_pending(self):
-        # Dispatch pending events from the default event queue,
-        # without reading any further events from the socket.
+        """Dispatch pending events in the default event queue.
+
+        Will not read from the server connection.
+        """
         while self._default_queue:
             e = self._default_queue.pop(0)
             if isinstance(e, Exception):
@@ -183,7 +204,13 @@ class _Display():
             proxy.dispatch_event(event, args)
 
     def roundtrip(self):
-        # Block until all pending requests are processed by the server
+        """Send a sync request to the server and wait for the reply.
+
+        Events are read from the server and dispatched if they are on
+        the default event queue.  This call blocks until the "done"
+        event on the wl_callback generated by the sync request has
+        been dispatched.
+        """
         ready = False
         def set_ready(callback, x):
             nonlocal ready
@@ -193,13 +220,13 @@ class _Display():
         while not ready:
             self.dispatch()
 
-    def decode(self, data):
+    def _decode(self, data):
         # There may be partial event data already received; add to it
         # if it's there
         if self._read_partial_event:
             data = self._read_partial_event + data
         while len(data) > 8:
-            oid, sizeop = struct.unpack("II", data[0:8])
+            oid, sizeop = struct.unpack("II", data[0 : 8])
             
             size = sizeop >> 16
             op = sizeop & 0xffff
@@ -209,8 +236,8 @@ class _Display():
                                "%d bytes available", size, len(data))
                 break
 
-            argdata = io.BytesIO(data[8:size])
-            data = data [size:]
+            argdata = io.BytesIO(data[8 : size])
+            data = data [size : ]
 
             obj = self.objects.get(oid, None)
             if obj:
@@ -218,7 +245,7 @@ class _Display():
                     e = obj._unmarshal_event(op, argdata, self._incoming_fds)
                     self.log.debug(
                         "queueing event: %s(%d) %s %s",
-                        e[0].interface.name, e[0]._oid, e[1].name, e[2])
+                        e[0].interface.name, e[0].oid, e[1].name, e[2])
                     obj.queue.append(e)
             else:
                 obj.queue.append(UnknownObjectError(obj))
@@ -229,11 +256,11 @@ def MakeDisplay(protocol):
 
     Args:
         protocol: a wayland.protocol.Protocol instance containing a
-        Wayland protocol definition.
+        core Wayland protocol definition.
 
     Returns:
         A Display proxy class built from the specified protocol.
     """
-    class Display(_Display, protocol.interfaces['wl_display'].proxy_class):
+    class Display(_Display, protocol['wl_display'].client_proxy_class):
         pass
     return Display

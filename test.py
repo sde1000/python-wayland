@@ -14,25 +14,25 @@ import logging
 # See https://github.com/sde1000/python-xkbcommon for the following:
 from xkbcommon import xkb
 
-log=logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
-shutdowncode=None
+shutdowncode = None
 
 # List of future events; objects must support the nexttime attribute
 # and alarm() method. nexttime should be the time at which the object
 # next wants to be called, or None if the object temporarily does not
 # need to be scheduled.
-eventlist=[]
+eventlist = []
 
 # List of file descriptors to watch with handlers.  Expected to be objects
 # with a fileno() method that returns the appropriate fd number, and methods
 # called doread(), dowrite(), etc.
-rdlist=[]
+rdlist = []
 
 # List of functions to invoke each time around the event loop.  These
 # functions may do anything, including changing timeouts and drawing
 # on the display.
-ticklist=[]
+ticklist = []
 
 # List of functions to invoke before calling select.  These functions
 # may not change timeouts or draw on the display.  They will typically
@@ -65,19 +65,20 @@ def eventloop():
             with tick_time_guard:
                 i()
         # Work out what the earliest timeout is
-        timeout=None
-        t=time.time()
+        timeout = None
+        t = time.time()
         for i in eventlist:
-            nt=i.nexttime
-            i.mainloopnexttime=nt
-            if nt is None: continue
-            if timeout is None or (nt-t)<timeout:
-                timeout=nt-t
+            nt = i.nexttime
+            i.mainloopnexttime = nt
+            if nt is None:
+                continue
+            if timeout is None or (nt - t) < timeout:
+                timeout = nt - t
         for i in preselectlist:
             with preselect_time_guard:
                 i()
         try:
-            (rd,wr,ex)=select.select(rdlist,[],[],timeout)
+            (rd, wr, ex) = select.select(rdlist, [], [], timeout)
         except KeyboardInterrupt:
             (rd, wr, ex) = [], [], []
             shutdowncode = 1
@@ -91,17 +92,19 @@ def eventloop():
             with doexcept_time_guard:
                 i.doexcept()
         # Process any events whose time has come
-        t=time.time()
+        t = time.time()
         for i in eventlist:
-            if not hasattr(i,'mainloopnexttime'): continue
-            if i.mainloopnexttime and t>=i.mainloopnexttime:
+            if not hasattr(i, 'mainloopnexttime'):
+                continue
+            if i.mainloopnexttime and t >= i.mainloopnexttime:
                 with alarm_time_guard:
                     i.alarm()
 
 
-class Window(object):
+class Window:
     def __init__(self, connection, width, height, title="Window",
-                 class_="quicktill", redraw=None, fullscreen=False):
+                 class_="python-wayland-test", redraw=None, fullscreen=False):
+        self.title = title
         self.orig_width = width
         self.orig_height = height
         self._w = connection
@@ -119,17 +122,20 @@ class Window(object):
         self.shell_surface.set_title(title)
         self.shell_surface.set_class(class_)
         self.shell_surface.dispatcher['ping'] = self._shell_surface_ping_handler
-        self.shell_surface.dispatcher['configure'] = self._shell_surface_configure_handler
+        self.shell_surface.dispatcher['configure'] = \
+            self._shell_surface_configure_handler
 
         self.buffer = None
         if not fullscreen:
             self.resize(width, height)
+
     def close(self):
         if not self.surface.destroyed:
             self.surface.destroy()
             self.buffer.destroy()
             self.shm_data.close()
             del self.s, self.buffer, self.shm_data
+
     def resize(self, width, height):
         # Drop previous buffer and shm data if necessary
         if self.buffer:
@@ -158,26 +164,33 @@ class Window(object):
         if self.redraw_func:
             self.redraw_func(self)
         self.surface.commit()
+
     def redraw(self):
         """Copy the whole window surface to the display"""
         self.add_damage()
         self.commit()
+
     def add_damage(self, x=0, y=0, width=None, height=None):
         if width is None:
             width = self.width
         if height is None:
             height = self.height
         self.surface.damage(x, y, width, height)
+
     def commit(self):
         self.surface.commit()
+
     def pointer_motion(self, seat, time, x, y):
         pass
+
     def _shell_surface_ping_handler(self, shell_surface, serial):
         shell_surface.pong(serial)
-    def _shell_surface_configure_handler(self, shell_surface, edges, width, height):
+
+    def _shell_surface_configure_handler(
+            self, shell_surface, edges, width, height):
         self.resize(width, height)
 
-class Seat(object):
+class Seat:
     def __init__(self, obj, connection, global_name):
         self.c_enum = connection.wp.interfaces['wl_seat'].enums['capability']
         self.s = obj
@@ -190,6 +203,7 @@ class Seat(object):
         self.s.dispatcher['capabilities'] = self._capabilities
         self.s.dispatcher['name'] = self._name
         self.tabsym = xkb.keysym_from_name("Tab")
+
     def removed(self):
         if self.pointer:
             self.pointer.release()
@@ -201,9 +215,11 @@ class Seat(object):
         # ...that's odd, there's no request in the protocol to destroy
         # the seat proxy!  I suppose we just have to leave it lying
         # around.
+
     def _name(self, seat, name):
         print("Seat got name: {}".format(name))
         self.name = name
+
     def _capabilities(self, seat, c):
         print("Seat {} got capabilities: {}".format(self.name, c))
         self.capabilities = c
@@ -224,24 +240,30 @@ class Seat(object):
             self.keyboard.dispatcher['key'] = self.keyboard_key
             self.keyboard.dispatcher['modifiers'] = self.keyboard_modifiers
             self.current_keyboard_window = None
+
     def pointer_enter(self, pointer, serial, surface, surface_x, surface_y):
         print("pointer_enter {} {} {} {}".format(
             serial, surface, surface_x, surface_y))
         self.current_pointer_window = self._c.surfaces.get(surface, None)
-        pointer.set_cursor(serial,None,0,0)
+        pointer.set_cursor(serial, None, 0, 0)
+
     def pointer_leave(self, pointer, serial, surface):
         print("pointer_leave {} {}".format(serial, surface))
         self.current_pointer_window = None
+
     def pointer_motion(self, pointer, time, surface_x, surface_y):
         self.current_pointer_window.pointer_motion(
             self, time, surface_x, surface_y)
+
     def pointer_button(self, pointer, serial, time, button, state):
         print("pointer_button {} {} {} {}".format(serial, time, button, state))
         if state == 1 and self.current_pointer_window:
             print("Seat {} starting shell surface move".format(self.name))
             self.current_pointer_window.shell_surface.move(self.s, serial)
+
     def pointer_axis(self, pointer, time, axis, value):
         print("pointer_axis {} {} {}".format(time, axis, value))
+
     def keyboard_keymap(self, keyboard, format_, fd, size):
         print("keyboard_keymap {} {} {}".format(format_, fd, size))
         keymap_data = mmap.mmap(
@@ -253,16 +275,20 @@ class Seat(object):
             keymap_data, length=size - 1)
         keymap_data.close()
         self.keyboard_state = keymap.state_new()
+
     def keyboard_enter(self, keyboard, serial, surface, keys):
         print("keyboard_enter {} {} {}".format(serial, surface, keys))
         self.current_keyboard_window = self._c.surfaces.get(surface, None)
+
     def keyboard_leave(self, keyboard, serial, surface):
         print("keyboard_leave {} {}".format(serial, surface))
         self.current_keyboard_window = None
+
     def keyboard_key(self, keyboard, serial, time, key, state):
         print("keyboard_key {} {} {} {}".format(serial, time, key, state))
         sym = self.keyboard_state.key_get_one_sym(key + 8)
         if state == 1 and sym == self.tabsym:
+            # Why did I put this in?!
             print("Saw a tab!")
         if state == 1:
             s = self.keyboard_state.key_get_string(key + 8)
@@ -282,8 +308,10 @@ class Seat(object):
                         self.current_keyboard_window.orig_width,
                         self.current_keyboard_window.orig_height)
                 else:
-                    self.current_keyboard_window.shell_surface.set_fullscreen(0,0,None)
+                    self.current_keyboard_window.shell_surface.set_fullscreen(
+                        0, 0, None)
                     self.current_keyboard_window.is_fullscreen = True
+
     def keyboard_modifiers(self, keyboard, serial, mods_depressed,
                            mods_latched, mods_locked, group):
         print("keyboard_modifiers {} {} {} {} {}".format(
@@ -291,7 +319,7 @@ class Seat(object):
         self.keyboard_state.update_mask(mods_depressed, mods_latched,
                                         mods_locked, group, 0, 0)
 
-class Output(object):
+class Output:
     def __init__(self, obj, connection, global_name):
         self.o = obj
         self._c = connection
@@ -299,24 +327,26 @@ class Output(object):
         self.o.dispatcher['geometry'] = self._geometry
         self.o.dispatcher['mode'] = self._mode
         self.o.dispatcher['done'] = self._done
+
     def _geometry(self, output, x, y, phy_width, phy_height, subpixel,
                   make, model, transform):
         print("Ouput: got geometry: x={}, y={}, phy_width={}, phy_height={},"
               "make={}, model={}".format(x, y, phy_width, phy_height,
                                          make, model))
+
     def _mode(self, output, flags, width, height, refresh):
         print("Output: got mode: flags={}, width={}, height={}, refresh={}" \
               .format(flags, width, height, refresh))
+
     def _done(self, output):
         print("Output: done for now")
 
-class WaylandConnection(object):
+class WaylandConnection:
     def __init__(self, wp):
         self.wp = wp
         # Create the Display proxy class from the protocol
-        DisplayClass = MakeDisplay(wp)
-        self.display = DisplayClass()
-        self.display.connect()
+        Display = MakeDisplay(wp)
+        self.display = Display()
 
         self.registry = self.display.get_registry()
         self.registry.dispatcher['global'] = self.registry_global_handler
@@ -353,15 +383,20 @@ class WaylandConnection(object):
 
         rdlist.append(self)
         preselectlist.append(self._preselect)
+
     def fileno(self):
         return self.display.get_fd()
+
     def disconnect(self):
         self.display.disconnect()
+
     def doread(self):
         self.display.recv()
         self.display.dispatch_pending()
+
     def _preselect(self):
         self.display.flush()
+
     def registry_global_handler(self, registry, name, interface, version):
         print("registry_global_handler: {} is {} v{}".format(
             name, interface, version))
@@ -381,12 +416,15 @@ class WaylandConnection(object):
         elif interface == "wl_output":
             self.outputs.append(Output(registry.bind(
                 name, self.wp.interfaces['wl_output'], version), self, name))
+
     def registry_global_remove_handler(self, registry, name):
+        # Haven't been able to get weston to send this event!
         print("registry_global_remove_handler: {} gone".format(name))
         for s in self.seats:
             if s.global_name == name:
                 print("...it was a seat!  Releasing seat resources.")
                 s.removed()
+
     def shm_format_handler(self, shm, format_):
         f = shm.interface.enums['format']
         if format_ == f.entries['argb8888'].value:
@@ -429,7 +467,7 @@ def draw_in_window(w):
     ctx.set_font_size(0.05)
     ctx.set_source_rgb(1.0, 1.0, 1.0)
     ctx.move_to(0.2, 0.2)
-    ctx.show_text("Test {} x {}".format(w.width, w.height))
+    ctx.show_text("{} {} x {}".format(w.title, w.width, w.height))
 
     del ctx
 
@@ -450,13 +488,15 @@ if __name__ == "__main__":
                   "is one running?")
             sys.exit(1)
         raise
-    w1 = Window(conn, 640, 480, redraw=draw_in_window)
-    w2 = Window(conn, 320, 240, redraw=draw_in_window)
+    w1 = Window(conn, 640, 480, title="Window 1", redraw=draw_in_window)
+    w2 = Window(conn, 320, 240, title="Window 2", redraw=draw_in_window)
+    w3 = Window(conn, 160, 120, title="Window 3", redraw=draw_in_window)
 
     eventloop()
 
     w1.close()
     w2.close()
+    w3.close()
 
     conn.display.roundtrip()
     conn.disconnect()
