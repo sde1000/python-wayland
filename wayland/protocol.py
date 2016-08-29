@@ -1,4 +1,4 @@
-from lxml import etree
+import xml.etree.ElementTree as ET
 import struct
 import os
 import logging
@@ -415,15 +415,14 @@ class Interface(object):
         return "Interface({})".format(self.name)
 
 class Protocol(object):
-    def __init__(self, filename, dtdfile=None):
-        parser = etree.XMLParser(dtd_validation=True)
-        dtd = None
-        if dtdfile:
-            with open(dtdfile) as f:
-                dtd = etree.DTD(f)
-        tree = etree.ElementTree(file=filename)
-        if dtd:
-            dtd.validate(tree)
+    def __init__(self, file, dtdfile=None):
+        """Load a Wayland protocol file.
+
+        Args:
+            file: a filename or file object containing an XML Wayland
+            protocol description
+        """
+        tree = ET.parse(file)
 
         protocol = tree.getroot()
         assert protocol.tag == "protocol"
@@ -439,6 +438,3 @@ class Protocol(object):
             elif c.tag == "interface":
                 i = Interface(self, c)
                 self.interfaces[i.name] = i
-        
-wayland = Protocol("/usr/share/wayland/wayland.xml",
-                   "/usr/share/wayland/wayland.dtd")

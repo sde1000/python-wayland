@@ -1,8 +1,6 @@
 import os
 import tempfile
-
-class NoXDGRuntimeDir(Exception):
-    pass
+from wayland.client import NoXDGRuntimeDir
 
 class AnonymousFile(object):
     def __init__(self, size):

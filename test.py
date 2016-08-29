@@ -2,9 +2,8 @@ import sys
 import os
 import mmap
 import cairocffi as cairo
-import wayland
-from wayland.client import Display
-from wayland.protocol import wayland
+import wayland.protocol
+from wayland.client import MakeDisplay
 from wayland.utils import AnonymousFile
 import math
 
@@ -179,8 +178,8 @@ class Window(object):
         self.resize(width, height)
 
 class Seat(object):
-    c_enum = wayland.interfaces['wl_seat'].enums['capability']
     def __init__(self, obj, connection, global_name):
+        self.c_enum = connection.wp.interfaces['wl_seat'].enums['capability']
         self.s = obj
         self._c = connection
         self.global_name = global_name
@@ -312,8 +311,11 @@ class Output(object):
         print("Output: done for now")
 
 class WaylandConnection(object):
-    def __init__(self):
-        self.display = Display()
+    def __init__(self, wp):
+        self.wp = wp
+        # Create the Display proxy class from the protocol
+        DisplayClass = MakeDisplay(wp)
+        self.display = DisplayClass()
         self.display.connect()
 
         self.registry = self.display.get_registry()
@@ -364,18 +366,21 @@ class WaylandConnection(object):
         print("registry_global_handler: {} is {} v{}".format(
             name, interface, version))
         if interface == "wl_compositor":
-            self.compositor = registry.bind(name, wayland.interfaces['wl_compositor'], version)
+            self.compositor = registry.bind(
+                name, self.wp.interfaces['wl_compositor'], version)
         elif interface == "wl_shell":
-            self.shell = registry.bind(name, wayland.interfaces['wl_shell'], version)
+            self.shell = registry.bind(
+                name, self.wp.interfaces['wl_shell'], version)
         elif interface == "wl_shm":
-            self.shm = registry.bind(name, wayland.interfaces['wl_shm'], version)
+            self.shm = registry.bind(
+                name, self.wp.interfaces['wl_shm'], version)
             self.shm.dispatcher['format'] = self.shm_format_handler
         elif interface == "wl_seat":
             self.seats.append(Seat(registry.bind(
-                name, wayland.interfaces['wl_seat'], version), self, name))
+                name, self.wp.interfaces['wl_seat'], version), self, name))
         elif interface == "wl_output":
             self.outputs.append(Output(registry.bind(
-                name, wayland.interfaces['wl_output'], version), self, name))
+                name, self.wp.interfaces['wl_output'], version), self, name))
     def registry_global_remove_handler(self, registry, name):
         print("registry_global_remove_handler: {} gone".format(name))
         for s in self.seats:
@@ -434,8 +439,11 @@ def draw_in_window(w):
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
+    # Load the main Wayland protocol.
+    wp = wayland.protocol.Protocol("/usr/share/wayland/wayland.xml")
+
     try:
-        conn = WaylandConnection()
+        conn = WaylandConnection(wp)
     except FileNotFoundError as e:
         if e.errno == 2:
             print("Unable to connect to the compositor - "
