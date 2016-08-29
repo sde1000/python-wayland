@@ -112,7 +112,7 @@ class _Display:
         return next(self._oids)
 
     def _delete_id(self, display, id_):
-        self.log.info("deleting %s", self.objects[id_])
+        self.log.info("server deleted %s", self.objects[id_])
         self.objects[id_].oid = None
         del self.objects[id_]
         if id_ < 0xff000000:
@@ -124,7 +124,7 @@ class _Display:
 
     def _queue_request(self, r, fds=[]):
         self.log.debug("queueing to send: %s with fds %s", r, fds)
-        self._send_queue.append((r,fds))
+        self._send_queue.append((r, fds))
 
     def flush(self):
         """Send buffered requests to the display server.
@@ -191,12 +191,15 @@ class _Display:
             self.recv()
         self.dispatch_pending()
 
-    def dispatch_pending(self):
-        """Dispatch pending events in the default event queue.
+    def dispatch_pending(self, queue=None):
+        """Dispatch pending events in an event queue.
 
+        If queue is None, dispatches from the default event queue.
         Will not read from the server connection.
         """
-        while self._default_queue:
+        if not queue:
+            queue = self._default_queue
+        while queue:
             e = self._default_queue.pop(0)
             if isinstance(e, Exception):
                 raise e

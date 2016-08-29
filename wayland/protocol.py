@@ -5,8 +5,6 @@ import struct
 import os
 import logging
 
-log = logging.getLogger(__name__)
-
 def _int_or_none(i):
     if i is None:
         return
@@ -376,7 +374,9 @@ class Request:
             proxy.log.info("request %s.%s%s", proxy, self.name, args)
         if self.is_destructor:
             proxy.destroyed = True
-            proxy.log.info("proxy destroyed by destructor request")
+            proxy.log.info(
+                "%s proxy destroyed by destructor request %s%s",
+                proxy, self.name, args)
         return r
 
 class Event:
