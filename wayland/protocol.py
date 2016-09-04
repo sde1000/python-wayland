@@ -5,11 +5,6 @@ import struct
 import os
 import logging
 
-def _int_or_none(i):
-    if i is None:
-        return
-    return int(i)
-
 def _description(d):
     assert d.tag == "description"
     return d.text, d.get('summary')
@@ -47,15 +42,18 @@ class ClientProxy:
 
     oid: the object ID of this instance
 
+    version: the version of this object
+
     dispatcher: dictionary mapping event names to callback functions
 
     silence: dictionary of event names that will not be logged
     """
 
-    def __init__(self, display, oid, queue):
+    def __init__(self, display, oid, queue, version):
         self.display = display
         self.oid = oid
         self.queue = queue
+        self.version = version
         self.dispatcher = {}
         self.silence = {}
         self.destroyed = False
@@ -69,7 +67,7 @@ class ClientProxy:
         rval = None
         fl = []
         for a in request.args:
-            b, r, fds = a.marshal(args, self.display)
+            b, r, fds = a.marshal_for_request(args, self)
             al.append(b)
             fl = fl + fds
             rval = rval or r
@@ -83,7 +81,7 @@ class ClientProxy:
         event = self.interface.events_by_number[opcode]
         args = []
         for arg in event.args:
-            v = arg.unmarshal(argdata, fd_source, self.display)
+            v = arg.unmarshal_from_event(argdata, fd_source, self)
             args.append(v)
         return (self, event, args)
 
@@ -138,27 +136,58 @@ class Arg:
 
         self.description = None
         self.summary = arg.get('summary', None)
-        self.interface = arg.get('interface', None)
         self.allow_null = (arg.get('allow-null', None) == "true")
 
         for c in arg:
             if c.tag == "description":
                 self.description, self.summary = _description(c)
 
-    def marshal(self, args, objmap):
+    def marshal(self, args):
+        """Marshal the argument.
+
+        Implement this when marshalling for requests and events is the
+        same operation.
+
+        args is the list of arguments still to marshal; this call
+        removes the appropriate number of items from args.
+
+        The return value is a tuple of (bytes, optional return value,
+        list of fds to send).
+        """
+        raise RuntimeError
+
+    def unmarshal(self, argdata, fd_source):
+        """Unmarshal the argument.
+
+        Implement this when unmarshalling from requests and events is
+        the same operation.
+
+        argdata is a file-like object providing access to the
+        remaining marshalled arguments; this call will consume the
+        appropriate number of bytes from this source
+
+        fd_source is an iterator object supplying fds that have been
+        received over the connection
+
+        The return value is the value of the argument.
+        """
+        raise RuntimeError
+
+    def marshal_for_request(self, args, proxy):
         """Marshal the argument
 
         args is the list of arguments still to marshal; this call
         removes the appropriate number of items from args
 
-        objmap is an object that implements a _get_new_oid() function
-        and has an objects dictionary
+        proxy is the interface proxy class instance being used for the
+        call.
 
         The return value is a tuple of (bytes, optional return value,
         list of fds to send)
         """
-        raise RuntimeError
-    def unmarshal(self, argdata, fd_source, objmap):
+        return self.marshal(args)
+
+    def unmarshal_from_event(self, argdata, fd_source, proxy):
         """Unmarshal the argument
 
         argdata is a file-like object providing access to the
@@ -168,44 +197,53 @@ class Arg:
         fd_source is an iterator object supplying fds that have been
         received over the connection
 
-        objmap is an object that implements a _get_new_oid() function
-        and has an objects dictionary
+        proxy is the interface proxy class instance being used for the
+        event.
 
         The return value is the value of the argument
         """
-        raise RuntimeError
+        return self.unmarshal(argdata, fd_source)
 
 class Arg_int(Arg):
     """Signed 32-bit integer argument"""
 
-    def marshal(self, args, objmap):
+    def marshal(self, args):
         v = args.pop(0)
         return struct.pack('i', v), None, []
 
-    def unmarshal(self, argdata, fd_source, objmap):
+    def unmarshal(self, argdata, fd_source):
         (v, ) = struct.unpack("i", argdata.read(4))
         return v
 
 class Arg_uint(Arg):
     """Unsigned 32-bit integer argument"""
 
-    def marshal(self, args, objmap):
+    def marshal(self, args):
         v = args.pop(0)
         return struct.pack('I', v), None, []
 
-    def unmarshal(self, argdata, fd_source, objmap):
+    def unmarshal(self, argdata, fd_source):
         (v, ) = struct.unpack("I", argdata.read(4))
         return v
 
 class Arg_new_id(Arg):
     """Newly created object argument"""
 
-    def marshal(self, args, objmap):
-        nid = objmap._get_new_oid()
-        if self.parent.creates:
-            # The interface type and version are determined by the
-            # request
-            npc = self.parent.interface.protocol[self.parent.creates].client_proxy_class
+    def __init__(self, parent, arg):
+        super(Arg_new_id, self).__init__(parent, arg)
+        self.interface = arg.get('interface', None)
+        if isinstance(parent, Event):
+            assert self.interface
+
+    def marshal_for_request(self, args, proxy):
+        nid = proxy.display._get_new_oid()
+        if self.interface:
+            # The interface type is part of the argument, and the
+            # version of the newly created object is the same as the
+            # version of the proxy.
+            npc = self.parent.interface.protocol[self.interface]\
+                                       .client_proxy_class
+            version = proxy.version
             b = struct.pack('I', nid)
         else:
             # The interface and version are supplied by the caller,
@@ -219,24 +257,31 @@ class Arg_new_id(Arg):
                      b'\x00'*(4-(len(iname) % 4)),
                      struct.pack('II',version,nid))
             b = b''.join(parts)
-        # XXX this works in a client, but I assume we need to do
-        # something different if we are marshalling this type when the
-        # server is sending an event to a client?
-        new_proxy = npc(objmap, nid, objmap._default_queue)
-        objmap.objects[nid] = new_proxy
+        new_proxy = npc(proxy.display, nid, proxy.display._default_queue,
+                        version)
+        proxy.display.objects[nid] = new_proxy
         return b, new_proxy, []
+
+    def unmarshal_from_event(self, argdata, fd_source, proxy):
+        assert self.interface
+        (nid, ) = struct.unpack("I", argdata.read(4))
+        npc = self.parent.interface.protocol[self.interface].client_proxy_class
+        new_proxy = npc(proxy.display, nid, proxy.display._default_queue,
+                        proxy.version)
+        proxy.display.objects[nid] = new_proxy
+        return new_proxy
 
 class Arg_string(Arg):
     """String argument"""
 
-    def marshal(self, args, objmap):
+    def marshal(self, args):
         estr = args.pop(0).encode('utf-8')
         parts = (struct.pack('I',len(estr)+1),
                  estr,
                  b'\x00'*(4-(len(estr) % 4)))
         return b''.join(parts), None, []
 
-    def unmarshal(self, argdata, fd_source, objmap):
+    def unmarshal(self, argdata, fd_source):
         # The length includes the terminating null byte
         (l, ) = struct.unpack("I", argdata.read(4))
         assert l > 0
@@ -248,7 +293,7 @@ class Arg_string(Arg):
 class Arg_object(Arg):
     """Existing object argument"""
 
-    def marshal(self, args, objmap):
+    def marshal(self, args):
         v = args.pop(0)
         if v:
             oid = v.oid
@@ -259,19 +304,19 @@ class Arg_object(Arg):
                 raise NullArgumentException()
         return struct.pack("I", oid), None, []
 
-    def unmarshal(self, argdata, fd_source, objmap):
+    def unmarshal_from_event(self, argdata, fd_source, proxy):
         (v, ) = struct.unpack("I", argdata.read(4))
-        return objmap.objects.get(v, None)
+        return proxy.display.objects.get(v, None)
 
 class Arg_fd(Arg):
     """File descriptor argument"""
 
-    def marshal(self, args, objmap):
+    def marshal(self, args):
         v = args.pop(0)
         fd = os.dup(v)
         return b'', None, [fd]
 
-    def unmarshal(self, argdata, fd_source, objmap):
+    def unmarshal(self, argdata, fd_source):
         return fd_source.pop(0)
 
 class Arg_fixed(Arg):
@@ -284,7 +329,7 @@ class Arg_fixed(Arg):
     # followed by 8 bits of decimal precision?  I've assumed the
     # latter because it seems to work!
 
-    def marshal(self, args, objmap):
+    def marshal(self, args):
         v = args.pop(0)
         if isinstance(v, int):
             m = v << 8
@@ -292,7 +337,7 @@ class Arg_fixed(Arg):
             m = (int(v) << 8) + int((v % 1.0) * 256)
         return struct.pack("i",m), None, []
 
-    def unmarshal(self, argdata, fd_source, objmap):
+    def unmarshal(self, argdata, fd_source):
         b = argdata.read(4)
         (m, ) = struct.unpack("i",b)
         return float(m >> 8) + ((m & 0xff) / 256.0)
@@ -304,7 +349,7 @@ class Arg_array(Arg):
     # zero termination.  Interpretation of the contents of the array
     # is request- or event-dependent.
 
-    def marshal(self, args, objmap):
+    def marshal(self, args):
         v = args.pop(0)
         # v should be bytes
         parts = (struct.pack('I',len(v)),
@@ -312,7 +357,7 @@ class Arg_array(Arg):
                  b'\x00'*(3 - ((len(v) - 1) % 4)))
         return b''.join(parts), None, []
 
-    def unmarshal(self, argdata, fd_source, objmap):
+    def unmarshal(self, argdata, fd_source):
         (l, ) = struct.unpack("I", argdata.read(4))
         v = argdata.read(l)
         pad = 3 - ((l - 1) % 4)
@@ -343,7 +388,7 @@ class Request:
 
         self.name = request.get('name')
         self.type = request.get('type', None)
-        self.since = _int_or_none(request.get('since', None))
+        self.since = int(request.get('since', 1))
 
         self.is_destructor = (self.type == "destructor")
 
@@ -376,6 +421,12 @@ class Request:
             proxy.log.info("request %s.%s%s on destroyed object; ignoring",
                            proxy, self.name, args)
             return
+        if proxy.version < self.since:
+            proxy.log.error(
+                "request %s.%s%s only exists from version %s, but proxy is "
+                "version %s", proxy, self.name, args, self.since,
+                proxy.version)
+            return
         r = proxy._marshal_request(self, *args)
         if r:
             proxy.log.info(
@@ -403,7 +454,7 @@ class Event:
 
         self.name = event.get('name')
         self.number = number
-        self.since = _int_or_none(event.get('since', None))
+        self.since = int(event.get('since', 1))
         self.args = []
         self.description = None
         self.summary = None
@@ -432,7 +483,7 @@ class Entry:
         self.value = int(entry.get('value'), base=0)
         self.description = None
         self.summary = entry.get('summary', None)
-        self.since = _int_or_none(entry.get('since', None))
+        self.since = int(entry.get('since', 1))
 
         for c in entry:
             if c.tag == "description":
@@ -456,7 +507,7 @@ class Enum:
         assert enum.tag == "enum"
 
         self.name = enum.get('name')
-        self.since = _int_or_none(enum.get('since', None))
+        self.since = int(enum.get('since', 1))
         self.entries = {}
         self.description = None
         self.summary = None
@@ -504,6 +555,7 @@ class Interface:
 
         self.name = interface.get('name')
         self.version = int(interface.get('version'))
+        assert self.version > 0
         self.description = None
         self.summary = None
         self.requests = {}

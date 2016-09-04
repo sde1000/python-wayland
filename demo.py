@@ -401,21 +401,26 @@ class WaylandConnection:
         print("registry_global_handler: {} is {} v{}".format(
             name, interface, version))
         if interface == "wl_compositor":
+            # We know up to and require version 3
             self.compositor = registry.bind(
-                name, self.wp.interfaces['wl_compositor'], version)
+                name, self.wp.interfaces['wl_compositor'], 3)
         elif interface == "wl_shell":
+            # We know up to and require version 1
             self.shell = registry.bind(
-                name, self.wp.interfaces['wl_shell'], version)
+                name, self.wp.interfaces['wl_shell'], 1)
         elif interface == "wl_shm":
+            # We know up to and require version 1
             self.shm = registry.bind(
-                name, self.wp.interfaces['wl_shm'], version)
+                name, self.wp.interfaces['wl_shm'], 1)
             self.shm.dispatcher['format'] = self.shm_format_handler
         elif interface == "wl_seat":
+            # We know up to and require version 4
             self.seats.append(Seat(registry.bind(
-                name, self.wp.interfaces['wl_seat'], version), self, name))
+                name, self.wp.interfaces['wl_seat'], 4), self, name))
         elif interface == "wl_output":
+            # We know up to and require version 2
             self.outputs.append(Output(registry.bind(
-                name, self.wp.interfaces['wl_output'], version), self, name))
+                name, self.wp.interfaces['wl_output'], 2), self, name))
 
     def registry_global_remove_handler(self, registry, name):
         # Haven't been able to get weston to send this event!

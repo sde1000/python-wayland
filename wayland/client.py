@@ -54,7 +54,7 @@ class _Display:
         self._reusable_oids = []
         self._default_queue = []
         super(_Display, self).__init__(self, self._get_new_oid(),
-                                       self._default_queue)
+                                       self._default_queue, 1)
         if hasattr(name_or_fd, 'fileno'):
             self._f = name_or_fd
             self.log.info("connected to existing fd %d", self._f)
