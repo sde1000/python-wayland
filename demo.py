@@ -223,7 +223,8 @@ class Seat:
     def _capabilities(self, seat, c):
         print("Seat {} got capabilities: {}".format(self.name, c))
         self.capabilities = c
-        if c & self.c_enum['pointer'] and not self.pointer:
+        pointer_available = c & self.c_enum['pointer']
+        if pointer_available and not self.pointer:
             self.pointer = self.s.get_pointer()
             self.pointer.dispatcher['enter'] = self.pointer_enter
             self.pointer.dispatcher['leave'] = self.pointer_leave
@@ -232,7 +233,12 @@ class Seat:
             self.pointer.dispatcher['button'] = self.pointer_button
             self.pointer.dispatcher['axis'] = self.pointer_axis
             self.current_pointer_window = None
-        if c & self.c_enum['keyboard'] and not self.keyboard:
+        if self.pointer and not pointer_available:
+            self.pointer.release()
+            self.current_pointer_window = None
+            self.pointer = None
+        keyboard_available = c & self.c_enum['keyboard']
+        if keyboard_available and not self.keyboard:
             self.keyboard = self.s.get_keyboard()
             self.keyboard.dispatcher['keymap'] = self.keyboard_keymap
             self.keyboard.dispatcher['enter'] = self.keyboard_enter
@@ -240,6 +246,11 @@ class Seat:
             self.keyboard.dispatcher['key'] = self.keyboard_key
             self.keyboard.dispatcher['modifiers'] = self.keyboard_modifiers
             self.current_keyboard_window = None
+        if self.keyboard and not keyboard_available:
+            self.keyboard.release()
+            self.current_keyboard_window = None
+            self.keyboard_state = None
+            self.keyboard = None
 
     def pointer_enter(self, pointer, serial, surface, surface_x, surface_y):
         print("pointer_enter {} {} {} {}".format(
