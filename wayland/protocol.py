@@ -22,6 +22,13 @@ class DeletedProxyException(Exception):
     """A request was made on an object that has already been deleted"""
     pass
 
+class DuplicateInterfaceName(Exception):
+    """A duplicate interface name was detected.
+
+    A protocol file specified an interface name that already exists.
+    """
+    pass
+
 class ClientProxy:
     """Abstract base class for a proxy to an interface.
 
@@ -32,6 +39,9 @@ class ClientProxy:
     object.
 
     Useful attributes:
+
+    interface (class attribute): the Interface this class is a proxy
+    for
 
     display: the wl_display this instance is connected to
 
@@ -310,7 +320,7 @@ class Arg_array(Arg):
             argdata.read(pad)
         return v
 
-def make_arg(parent, tag):
+def _make_arg(parent, tag):
     t = tag.get("type")
     c = "Arg_" + tag.get("type")
     return globals()[c](parent, tag)
@@ -348,7 +358,7 @@ class Request:
             if c.tag == "description":
                 self.description, self.summary = _description(c)
             elif c.tag == "arg":
-                a = make_arg(self, c)
+                a = _make_arg(self, c)
                 if a.type == "new_id":
                     self.creates = a.interface
                 self.args.append(a)
@@ -402,7 +412,7 @@ class Event:
             if c.tag == "description":
                 self.description, self.summary = _description(c)
             elif c.tag == "arg":
-                self.args.append(make_arg(self, c))
+                self.args.append(_make_arg(self, c))
 
     def __str__(self):
         return "{}::{}".format(self.interface, self.name)
@@ -494,6 +504,8 @@ class Interface:
 
         self.name = interface.get('name')
         self.version = int(interface.get('version'))
+        self.description = None
+        self.summary = None
         self.requests = {}
         self.events_by_name = {}
         self.events_by_number = []
@@ -513,18 +525,18 @@ class Interface:
                 e = Enum(self, c)
                 self.enums[e.name] = e
 
-        def add_proxy_arg(x):
+        def client_proxy_request(x):
             def call_request(*args):
                 return x.invoke(*args)
             return call_request
         d = {
             '__doc__': self.description,
             'interface': self,
-            }
+        }
         for r in self.requests.values():
-            d[r.name] = add_proxy_arg(r)
+            d[r.name] = client_proxy_request(r)
         self.client_proxy_class = type(
-            str(self.name+'_client_proxy'), (ClientProxy,), d)
+            str(self.name + '_client_proxy'), (ClientProxy,), d)
 
         # TODO: create a server proxy class as well
 
@@ -548,10 +560,13 @@ class Protocol:
     This Protocol class corresponds to one protocol XML file.  These
     contain one or more interfaces, which are accessible in this class
     via the "interfaces" attribute which is a dictionary keyed by
-    interface name.  Once created, this class should be treated as
-    immutable.
+    interface name.  Once instantiated this class should be treated as
+    immutable, with the only exception being that interfaces of
+    "child" protocols that are loaded with this class instance as an
+    ancestor will be added to the "interfaces" dictionary.
 
-    As a shortcut, accessing an instance of this class will access the
+    As a shortcut, accessing an instance of this class through
+    __getitem__ (for example wayland['wl_display']) will access the
     interfaces dictionary.
 
     The copyright notice from the XML file, if present, is accessible
@@ -585,7 +600,8 @@ class Protocol:
                 self.copyright = c.text
             elif c.tag == "interface":
                 i = Interface(self, c)
-                assert i.name not in self.interfaces
+                if i.name in self.interfaces:
+                    raise DuplicateInterfaceName(i.name)
                 self.interfaces[i.name] = i
 
     def __getitem__(self, x):
