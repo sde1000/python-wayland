@@ -278,7 +278,7 @@ class Seat:
     def keyboard_keymap(self, keyboard, format_, fd, size):
         print("keyboard_keymap {} {} {}".format(format_, fd, size))
         keymap_data = mmap.mmap(
-            fd, 0, prot=mmap.PROT_READ, flags=mmap.MAP_SHARED)
+            fd, size, prot=mmap.PROT_READ, flags=mmap.MAP_PRIVATE)
         os.close(fd)
         # The provided keymap appears to have a terminating NULL which
         # xkbcommon chokes on.  Specify length=size-1 to remove it.
