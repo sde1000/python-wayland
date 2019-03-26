@@ -133,8 +133,9 @@ class Window:
         if not self.surface.destroyed:
             self.surface.destroy()
             self.buffer.destroy()
+            self.buffer = None
             self.shm_data.close()
-            del self.s, self.buffer, self.shm_data
+            del self.s, self.shm_data
 
     def resize(self, width, height):
         # Drop previous buffer and shm data if necessary
@@ -188,7 +189,8 @@ class Window:
 
     def _shell_surface_configure_handler(
             self, shell_surface, edges, width, height):
-        self.resize(width, height)
+        if not self.surface.destroyed:
+            self.resize(width, height)
 
 class Seat:
     def __init__(self, obj, connection, global_name):
