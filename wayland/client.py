@@ -39,7 +39,7 @@ class DisplayError(Exception):
         self.message = message
     def __str__(self):
         return "DisplayError({}, {} (\"{}\"), {})".format(
-            obj, code, codestr, message)
+            self.obj, self.code, self.codestr, self.message)
 
 class _Display:
     """Additional methods for wl_display interface proxy
@@ -118,9 +118,10 @@ class _Display:
         if id_ < 0xff000000:
             self._reusable_oids.append(id_)
 
-    def _error_event(self, obj, code, message):
+    def _error_event(self, *args):
         # XXX look up string for error code in enum
-        raise DisplayError(obj, code, "", message)
+        objs, (code, message) = args[:-2],args[-2:]
+        raise DisplayError(str(objs), str(code), "", str(message))
 
     def _queue_request(self, r, fds=[]):
         self.log.debug("queueing to send: %s with fds %s", r, fds)
@@ -165,7 +166,7 @@ class _Display:
             for cmsg_level, cmsg_type, cmsg_data in ancdata:
                 if (cmsg_level == socket.SOL_SOCKET and
                     cmsg_type == socket.SCM_RIGHTS):
-                    fds.fromstring(cmsg_data[
+                    fds.frombytes(cmsg_data[
                         :len(cmsg_data) - (len(cmsg_data) % fds.itemsize)])
             self._incoming_fds.extend(fds)
             if data:
