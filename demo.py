@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import sys
 import os
 import mmap
@@ -100,6 +101,11 @@ def eventloop():
                 with alarm_time_guard:
                     i.alarm()
 
+def ping_handler(thing, serial):
+    """
+    Respond to a 'ping' with a 'pong'.
+    """
+    thing.pong(serial)
 
 class Window:
     def __init__(self, connection, width, height, title="Window",
@@ -114,34 +120,47 @@ class Window:
         self.redraw_func = redraw
         self.surface = self._w.compositor.create_surface()
         self._w.surfaces[self.surface] = self
-        self.shell_surface = self._w.shell.get_shell_surface(self.surface)
+        self.xdg_surface = self._w.xdg_wm_base.get_xdg_surface(self.surface)
+        self.xdg_toplevel = self.xdg_surface.get_toplevel()
+        self.xdg_toplevel.set_title(title)
+        self.xdg_toplevel.set_parent(None)
+        self.xdg_toplevel.set_app_id(class_)
+        self.xdg_toplevel.set_min_size(width, height)
+        self.xdg_toplevel.set_max_size(width, height)
+
         if fullscreen:
-            self.shell_surface.set_fullscreen(0, 0, None)
-        else:
-            self.shell_surface.set_toplevel()
-        self.shell_surface.set_title(title)
-        self.shell_surface.set_class(class_)
-        self.shell_surface.dispatcher['ping'] = self._shell_surface_ping_handler
-        self.shell_surface.dispatcher['configure'] = \
-            self._shell_surface_configure_handler
+            self.xdg_toplevel.set_fullscreen(None)
+
+        self.wait_for_configure = True
+        self.xdg_surface.dispatcher['ping'] = ping_handler
+        self.xdg_surface.dispatcher['configure'] = \
+            self._xdg_surface_configure_handler
+
+        #self.xdg_toplevel.dispatcher['configure'] = lambda *x: None
+        #self.xdg_toplevel.dispatcher['close'] = lambda *x: None
 
         self.buffer = None
-        if not fullscreen:
-            self.resize(width, height)
+        self.shm_data = None
+        self.surface.commit()
 
     def close(self):
         if not self.surface.destroyed:
             self.surface.destroy()
-            self.buffer.destroy()
-            self.buffer = None
-            self.shm_data.close()
-            del self.s, self.shm_data
+            if self.buffer is not None:
+                self.buffer.destroy()
+                self.buffer = None
+                self.shm_data.close()
+                del self.s, self.shm_data
 
     def resize(self, width, height):
         # Drop previous buffer and shm data if necessary
         if self.buffer:
             self.buffer.destroy()
             self.shm_data.close()
+
+        # Do not complete a resize until configure has been acknowledged
+        if self.wait_for_configure:
+            return
 
         wl_shm_format, cairo_shm_format = self._w.shm_formats[0]
         
@@ -162,14 +181,17 @@ class Window:
         self.surface.attach(self.buffer, 0, 0)
         self.width = width
         self.height = height
+
         if self.redraw_func:
+            # This should invoke `redraw` which then invokes `surface.commit`
             self.redraw_func(self)
-        self.surface.commit()
+        else:
+            self.surface.commit()
 
     def redraw(self):
         """Copy the whole window surface to the display"""
         self.add_damage()
-        self.commit()
+        self.surface.commit()
 
     def add_damage(self, x=0, y=0, width=None, height=None):
         if width is None:
@@ -178,23 +200,20 @@ class Window:
             height = self.height
         self.surface.damage(x, y, width, height)
 
-    def commit(self):
-        self.surface.commit()
-
     def pointer_motion(self, seat, time, x, y):
         pass
 
-    def _shell_surface_ping_handler(self, shell_surface, serial):
-        shell_surface.pong(serial)
+    def _xdg_surface_configure_handler(
+            self, the_xdg_surface, serial):
+        the_xdg_surface.ack_configure(serial)
 
-    def _shell_surface_configure_handler(
-            self, shell_surface, edges, width, height):
+        self.wait_for_configure = False
         if not self.surface.destroyed:
-            self.resize(width, height)
+            self.resize(self.orig_width, self.orig_height)
 
 class Seat:
     def __init__(self, obj, connection, global_name):
-        self.c_enum = connection.wp.interfaces['wl_seat'].enums['capability']
+        self.c_enum = connection.interfaces['wl_seat'].enums['capability']
         self.s = obj
         self._c = connection
         self.global_name = global_name
@@ -265,6 +284,8 @@ class Seat:
         self.current_pointer_window = None
 
     def pointer_motion(self, pointer, time, surface_x, surface_y):
+        if not self.current_pointer_window:
+            raise Exception("Pointer motion encountered even though there is not a matching window")
         self.current_pointer_window.pointer_motion(
             self, time, surface_x, surface_y)
 
@@ -272,7 +293,7 @@ class Seat:
         print("pointer_button {} {} {} {}".format(serial, time, button, state))
         if state == 1 and self.current_pointer_window:
             print("Seat {} starting shell surface move".format(self.name))
-            self.current_pointer_window.shell_surface.move(self.s, serial)
+            self.current_pointer_window.xdg_toplevel.move(self.s, serial)
 
     def pointer_axis(self, pointer, time, axis, value):
         print("pointer_axis {} {} {}".format(time, axis, value))
@@ -315,14 +336,13 @@ class Seat:
             elif s == "f":
                 # Fullscreen toggle
                 if self.current_keyboard_window.is_fullscreen:
-                    self.current_keyboard_window.shell_surface.set_toplevel()
+                    self.current_keyboard_window.xdg_toplevel.unset_fullscreen()
                     self.current_keyboard_window.is_fullscreen = False
                     self.current_keyboard_window.resize(
                         self.current_keyboard_window.orig_width,
                         self.current_keyboard_window.orig_height)
                 else:
-                    self.current_keyboard_window.shell_surface.set_fullscreen(
-                        0, 0, None)
+                    self.current_keyboard_window.xdg_toplevel.set_fullscreen(None)
                     self.current_keyboard_window.is_fullscreen = True
 
     def keyboard_modifiers(self, keyboard, serial, mods_depressed,
@@ -355,10 +375,15 @@ class Output:
         print("Output: done for now")
 
 class WaylandConnection:
-    def __init__(self, wp):
-        self.wp = wp
+    def __init__(self, wp_base, *other_wps):
+        self.wps = (wp_base,) + other_wps
+        self.interfaces = {}
+        for wp in self.wps:
+            for k,v in wp.interfaces.items():
+                self.interfaces[k] = v
+        
         # Create the Display proxy class from the protocol
-        Display = MakeDisplay(wp)
+        Display = MakeDisplay(wp_base)
         self.display = Display()
 
         self.registry = self.display.get_registry()
@@ -372,7 +397,7 @@ class WaylandConnection:
         self.surfaces = {}
 
         self.compositor = None
-        self.shell = None
+        self.xdg_wm_base = None
         self.shm = None
         self.shm_formats = []
         self.seats = []
@@ -386,8 +411,8 @@ class WaylandConnection:
 
         if not self.compositor:
             raise RuntimeError("Compositor not found")
-        if not self.shell:
-            raise RuntimeError("Shell not found")
+        if not self.xdg_wm_base:
+            raise RuntimeError("xdg_wm_base not found")
         if not self.shm:
             raise RuntimeError("Shm not found")
 
@@ -416,24 +441,24 @@ class WaylandConnection:
         if interface == "wl_compositor":
             # We know up to and require version 3
             self.compositor = registry.bind(
-                name, self.wp.interfaces['wl_compositor'], 3)
-        elif interface == "wl_shell":
+                name, self.interfaces['wl_compositor'], 3)
+        elif interface == "xdg_wm_base":
             # We know up to and require version 1
-            self.shell = registry.bind(
-                name, self.wp.interfaces['wl_shell'], 1)
+            self.xdg_wm_base = registry.bind(
+                name, self.interfaces['xdg_wm_base'], 1)
         elif interface == "wl_shm":
             # We know up to and require version 1
             self.shm = registry.bind(
-                name, self.wp.interfaces['wl_shm'], 1)
+                name, self.interfaces['wl_shm'], 1)
             self.shm.dispatcher['format'] = self.shm_format_handler
         elif interface == "wl_seat":
             # We know up to and require version 4
             self.seats.append(Seat(registry.bind(
-                name, self.wp.interfaces['wl_seat'], 4), self, name))
+                name, self.interfaces['wl_seat'], 4), self, name))
         elif interface == "wl_output":
             # We know up to and require version 2
             self.outputs.append(Output(registry.bind(
-                name, self.wp.interfaces['wl_output'], 2), self, name))
+                name, self.interfaces['wl_output'], 2), self, name))
 
     def registry_global_remove_handler(self, registry, name):
         # Haven't been able to get weston to send this event!
@@ -496,10 +521,11 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     # Load the main Wayland protocol.
-    wp = wayland.protocol.Protocol("/usr/share/wayland/wayland.xml")
+    wp_base = wayland.protocol.Protocol("/usr/share/wayland/wayland.xml")
+    wp_xdg_shell = wayland.protocol.Protocol("/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml")
 
     try:
-        conn = WaylandConnection(wp)
+        conn = WaylandConnection(wp_base, wp_xdg_shell)
     except FileNotFoundError as e:
         if e.errno == 2:
             print("Unable to connect to the compositor - "
